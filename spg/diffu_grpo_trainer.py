@@ -584,13 +584,13 @@ class DiffuGRPOTrainer(GRPOTrainer):
             rewards_to_log = rewards.tolist()
 
             if self.accelerator.is_main_process:
-                if is_rich_available():
-                    print_prompt_completions_sample(
-                        prompts_to_log,
-                        completions_to_log,
-                        rewards_to_log,
-                        self.state.global_step,
-                    )
+                # if is_rich_available():
+                #     print_prompt_completions_sample(
+                #         prompts_to_log,
+                #         completions_to_log,
+                #         rewards_to_log,
+                #         self.state.global_step,
+                #     )
                 if self.args.report_to and "wandb" in self.args.report_to and wandb.run is not None:
                     import pandas as pd
 

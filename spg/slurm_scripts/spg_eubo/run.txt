@@ -1,0 +1,2 @@
+RESUME_DIR=/home/jwliu/dlm/SPG/save_dir/spg_eubo_20251127_215615 \
+GPU_IDS=0 ./spg/slurm_scripts/spg_eubo/run_math_base_spg_eubo_beta1.5.sh

@@ -162,3 +162,40 @@ def get_math_questions(split="train") -> Dataset:
         }
     )  # type: ignore
     return data  # type: ignore
+
+
+def load_local_dataset_as_hf(path: str) -> Dataset:
+    """Load a local JSONL/JSON/CSV file and return a HuggingFace Dataset.
+
+    Supported formats: .jsonl, .json (newline-delimited JSON), .csv.
+    """
+    if path.endswith(".jsonl") or path.endswith(".json"):
+        df = pd.read_json(path, lines=True)
+    elif path.endswith(".csv"):
+        df = pd.read_csv(path, dtype=str)
+    else:
+        raise ValueError(
+            "Unsupported file format for local dataset. Supported: .jsonl, .json, .csv"
+        )
+    return Dataset.from_pandas(df)
+
+
+def get_math_questions_from_local(local_data_path: str) -> Dataset:
+    """Load math questions from a local JSONL/CSV and format them like `get_math_questions`.
+
+    Example: `get_math_questions_from_local('dataset/test_math_debug.jsonl')`
+    """
+    data = load_local_dataset_as_hf(local_data_path)
+    data = data.map(
+        lambda x: {  # type: ignore
+            "prompt": [
+                {
+                    "role": "user",
+                    "content": f"{SYSTEM_PROMPT}\n\nYou are a math expert. You will be given a question to solve. Solve it step by step. Wrap the final answer in a \\boxed{{}}. \n\n{x['problem']}",
+                },
+            ],
+            "answer": x["solution"],
+        }
+    )  # type: ignore
+    return data  # type: ignore
+

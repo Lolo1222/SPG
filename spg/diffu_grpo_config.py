@@ -362,6 +362,12 @@ class DiffuGRPOConfig(TrainingArguments):
     dataset: Optional[str] = field(
         default="gsm8k",
     )
+    # Path to a local dataset file (jsonl/json/csv). When set, training will use this
+    # local file for datasets that support local loading (e.g., math).
+    local_data_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to local dataset file (jsonl/json/csv) to use instead of HF datasets."},
+    )
     epsilon: float = field(
         default=0.2,
         metadata={"help": "Epsilon value for clipping."},

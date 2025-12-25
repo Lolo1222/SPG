@@ -1,0 +1,7 @@
+# eubo
+GPU_IDS=1 CONDA_ENV=spg NUM_ITER=1 PER_DEVICE_TRAIN_BATCH_SIZE=1 DRY_RUN=1 \
+/home/jwliu/dlm/SPG/spg/slurm_scripts/spg_eubo/run_math_base_spg_eubo_beta1.5.sh
+
+# elbo
+GPU_IDS=1 CONDA_ENV=spg NUM_ITER=1 PER_DEVICE_TRAIN_BATCH_SIZE=1 DRY_RUN=1 \
+/home/jwliu/dlm/SPG/spg/slurm_scripts/spg_elbo/run_math_base_spg_elbo_beta1.5.sh

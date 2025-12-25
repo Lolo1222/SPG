@@ -209,6 +209,7 @@ if __name__ == "__main__":
         init_seed(args.seed)
 
     args.diffusion_steps = args.gen_length // 2
+    # num_evals = {"gsm8k": -1, "math": 2, "countdown": 256, "sudoku": 256}
     num_evals = {"gsm8k": -1, "math": -1, "countdown": 256, "sudoku": 256}
 
     if len(args.checkpoint_path):

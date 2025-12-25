@@ -31,16 +31,16 @@ def correctness_reward_func(prompts, completions, answer, step=None, run_name=No
     BLUE = "\033[94m"
     RESET = "\033[0m"
 
-    print(
-        "-" * 20,
-        f"\n{RED}Prompt:{RESET}\n{q}\n",
-        "-" * 20,
-        f"\n{GREEN}Ground Truth:{RESET}\n{answer[0]}\n",
-        "-" * 20,
-        f"\n{BLUE}Response:{RESET}\n{responses[0]}\n",
-        "-" * 20,
-        f"\n{YELLOW}Extracted:{RESET}\n{extracted_responses[0]}\n",
-    )
+    # print(
+    #     "-" * 20,
+    #     f"\n{RED}Prompt:{RESET}\n{q}\n",
+    #     "-" * 20,
+    #     f"\n{GREEN}Ground Truth:{RESET}\n{answer[0]}\n",
+    #     "-" * 20,
+    #     f"\n{BLUE}Response:{RESET}\n{responses[0]}\n",
+    #     "-" * 20,
+    #     f"\n{YELLOW}Extracted:{RESET}\n{extracted_responses[0]}\n",
+    # )
     return [2.0 if r == a else 0.0 for r, a in zip(extracted_responses, answer)]
 
 
@@ -254,17 +254,17 @@ def correctness_reward_func_math(
     BLUE = "\033[94m"
     RESET = "\033[0m"
 
-    print(
-        "-" * 20,
-        f"\n{RED}Question:{RESET}\n{q}",
-        "-" * 20,
-        f"\n{GREEN}Ground Truth:{RESET}\n{answer[0]}",
-        "-" * 20,
-        f"\n{BLUE}Response:{RESET}\n{responses[0]}",
-        "-" * 20,
-        f"\n{YELLOW}Extracted:{RESET}\n{extracted_responses[0]}",
-    )
-    print("✅" if is_equiv(extracted_responses[0], answer[0]) else "❌")
+    # print(
+    #     "-" * 20,
+    #     f"\n{RED}Question:{RESET}\n{q}",
+    #     "-" * 20,
+    #     f"\n{GREEN}Ground Truth:{RESET}\n{answer[0]}",
+    #     "-" * 20,
+    #     f"\n{BLUE}Response:{RESET}\n{responses[0]}",
+    #     "-" * 20,
+    #     f"\n{YELLOW}Extracted:{RESET}\n{extracted_responses[0]}",
+    # )
+    # print("✅" if is_equiv(extracted_responses[0], answer[0]) else "❌")
 
     return [2.0 if is_equiv(r, a) else 0.0 for r, a in zip(extracted_responses, answer)]
 

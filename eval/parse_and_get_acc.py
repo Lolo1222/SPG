@@ -11,6 +11,7 @@ import glob
 import tiktoken
 from collections import defaultdict
 from parser_helper import is_equiv, remove_boxed, last_boxed_only_string
+# from .parser_helper import is_equiv, remove_boxed, last_boxed_only_string
 
 
 def count_effective_tokens(text):
@@ -464,4 +465,7 @@ def aggregate_results(directory="."):
 
 
 if __name__ == "__main__":
-    aggregate_results(directory="eval_results/eval_results_gsm8k_llada")
+    aggregate_results(directory="save_dir/eval_results/eval_results_math_llada")
+    aggregate_results(directory="save_dir/eval_results/elbo_eval_results_math_llada_spg_elbo_20251126_044820")
+    aggregate_results(directory="save_dir/eval_results/eubo_eval_results_math_llada_spg_eubo_20251127_215615")
+    aggregate_results(directory="save_dir/eval_results/eubo_eval_results_math_llada_2_spg_eubo_20251212_175807")

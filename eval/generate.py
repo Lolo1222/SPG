@@ -15,6 +15,7 @@ def add_gumbel_noise(logits, temperature):
     The Gumbel max is a method for sampling categorical distributions.
     Using float16 for better performance while maintaining reasonable quality.
     """
+    # XXX(LIU): whether need to add dtype=torch.float16 support
     if temperature == 0.0:
         return logits  # Skip noise when temperature is 0
 
