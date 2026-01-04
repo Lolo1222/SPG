@@ -49,6 +49,7 @@ RewardFunc = Union[str, PreTrainedModel, Callable[[list, list], list[float]]]
 # generate_and_score_completions
 class SOGRPOTrainer(GRPOTrainer):
     """
+    based on spg_trainer.py
     Semi-Offline GRPO Trainer class. Inherits from GRPOTrainer.
     Three features:
     1. sampling can be semi-offline, i.e., for each sampling process, we can sample sequences on partially masked completions.
@@ -97,6 +98,7 @@ class SOGRPOTrainer(GRPOTrainer):
         # Compute the per-token log probabilities for the model
 
         prompt_ids, prompt_mask = inputs["prompt_ids"], inputs["prompt_mask"]
+        # what's this?
         completion_ids, completion_mask = inputs["completion_ids"], inputs["completion_mask"]
         mask_seeds = inputs["mask_seeds"]
 
@@ -108,7 +110,11 @@ class SOGRPOTrainer(GRPOTrainer):
         this_itr_idx = self._step % self.args.num_iterations
         this_itr_mask_seed = mask_seeds[this_itr_idx]
         input_ids = input_ids.unsqueeze(0)
-        per_seq_logps = self._get_per_seq_logps(model, input_ids, logits_to_keep, [this_itr_mask_seed], prompt_mask, completion_mask, reward_mask=inputs['reward_mask']) # num_iterations, batch_size
+        if self.args.semi_offline_flag:
+            generation_mask = inputs["generation_mask"]
+            per_seq_logps = self._get_per_seq_logps_for_semi_offline(model, input_ids, logits_to_keep, [this_itr_mask_seed], generation_mask, prompt_mask, completion_mask, reward_mask=inputs['reward_mask']) # num_iterations, batch_size
+        else:
+            per_seq_logps = self._get_per_seq_logps(model, input_ids, logits_to_keep, [this_itr_mask_seed], prompt_mask, completion_mask, reward_mask=inputs['reward_mask']) # num_iterations, batch_size
         
         # Check for NaN/inf in per_seq_logps
         if torch.isnan(per_seq_logps).any() or torch.isinf(per_seq_logps).any():
@@ -145,6 +151,124 @@ class SOGRPOTrainer(GRPOTrainer):
         gumbel_noise = (-torch.log(noise)) ** temperature
         return logits.exp() / gumbel_noise
 
+    def generate_for_semi_offline(
+        self,
+        model,
+        prompt,
+        masked_generation,
+        steps=128,
+        gen_length=128,
+        block_length=128,
+        temperature=0.0,
+        cfg_scale=0.0,
+        remasking="low_confidence",
+        mask_id=126336,
+        prompt_mask=None,
+        # return_trajectory_samples=False,
+    ):
+        # Lolo1222: if masked_generation length > gen_length, we only generate gen_length tokens and give a warning
+        if masked_generation.size(1) > gen_length:
+            print(f"WARNING: masked_generation length {masked_generation.size(1)} > gen_length {gen_length}, only generating first {gen_length} tokens.")
+            masked_generation = masked_generation[:, :gen_length]
+        with torch.cuda.amp.autocast(enabled=True):
+            bs = prompt.shape[0]
+            dtype = model.dtype
+            x = torch.full((bs, prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
+            x[:, : prompt.shape[1]] = prompt.clone()
+            # Lolo1222: give the masked_generation to the generation part
+            x[:, prompt.shape[1]:prompt.shape[1] + masked_generation.size(1)] = masked_generation.clone()
+            if prompt_mask is not None:
+                # extend prompt_mask to the same shape as x, it originally has [bsz, prompt_length]
+                prompt_mask = prompt_mask.bool()
+                gen_mask = torch.ones(bs, gen_length, dtype=torch.bool).to(model.device)
+                prompt_mask = torch.cat([prompt_mask, gen_mask], dim=1)
+
+            prompt_index = x != mask_id
+
+            assert gen_length % block_length == 0
+            num_blocks = gen_length // block_length
+
+            # Determine steps per block (scalar used for transfer scheduling)
+            # steps_per_block = max(1, steps // num_blocks)
+            steps_per_block_list = []
+
+            # Compute, for each block, how many tokens in x[:, prompt:] are mask_id,
+            # then normalize by (gen_length // steps) and store per-block results.
+            masked_gen = x[:, prompt.shape[1]:]  # [bs, gen_length]
+            denom = gen_length // steps
+            for bidx in range(num_blocks):
+                s = bidx * block_length
+                e = (bidx + 1) * block_length
+                counts = (masked_gen[:, s:e] == mask_id).sum(dim=1)  # [bs]
+                normalized = counts // denom  # [bs]
+                steps_per_block_list.append(normalized)
+
+
+            for num_block in range(num_blocks):
+                start_idx = prompt.shape[1] + num_block * block_length
+                end_idx = prompt.shape[1] + (num_block + 1) * block_length
+
+                block_mask_index = x[:, start_idx:end_idx] == mask_id
+                # Lolo1222: !!! asume steps_per_block is the same for all sequences in the batch, i.e., num_generations = per_device_train_batch_size
+                num_transfer_tokens = self.get_num_transfer_tokens(block_mask_index, steps_per_block_list[num_block][0].item())
+
+                for i in range(steps_per_block_list[num_block][0].item()):
+                    torch.cuda.empty_cache()
+                    mask_index = x == mask_id
+
+                    if hasattr(torch.cuda, "amp") and hasattr(torch.cuda.amp, "autocast"):
+                        with torch.cuda.amp.autocast(enabled=self.args.fp16):
+                            # Handle classifier-free guidance more efficiently
+                            if cfg_scale > 0.0:
+                                un_x = x.clone()
+                                un_x[prompt_index] = mask_id
+                                x_ = torch.cat([x, un_x], dim=0)
+
+                                # Get logits in a single forward pass
+                                logits = model(x_, attention_mask=prompt_mask).logits
+                                logits, un_logits = torch.chunk(logits, 2, dim=0)
+                                logits = un_logits + (cfg_scale + 1) * (logits - un_logits)
+                            else:
+                                # XXX(Lolo1222): only non masked tokens have logits? NO!
+                                logits = model(x, attention_mask=prompt_mask).logits
+
+                            # Apply Gumbel noise for sampling
+                            logits_with_noise = self.add_gumbel_noise(
+                                logits, temperature=temperature, dtype=dtype
+                            )
+                            x0 = torch.argmax(logits_with_noise, dim=-1)
+                            del logits_with_noise
+
+                            # Handle remasking strategy
+                            if remasking == "low_confidence":
+                                p = F.softmax(logits.to(dtype), dim=-1)
+                                x0_p = torch.squeeze(
+                                    torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1
+                                )
+                            elif remasking == "random":
+                                x0_p = torch.rand((x0.shape[0], x0.shape[1]), device=x0.device)
+                            else:
+                                raise NotImplementedError(remasking)
+
+                            # Ensure we don't process tokens beyond the current block
+                            x0_p[:, end_idx:] = -np.inf
+
+                            # Update masked tokens
+                            # Lolo1222: Notice! only remain masked token's probabilities.
+                            x0 = torch.where(mask_index, x0, x)
+                            confidence = torch.where(mask_index, x0_p, -np.inf)
+
+                            # Select tokens to transfer based on confidence
+                            transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=x0.device)
+                            for j in range(confidence.shape[0]):
+                                num_tokens = num_transfer_tokens[j, i].item()
+                                if num_tokens > 0:
+                                    _, select_index = torch.topk(confidence[j], k=num_tokens)
+                                    transfer_index[j, select_index] = True
+
+                            x[transfer_index] = x0[transfer_index]
+                            del x0, confidence, transfer_index
+            return x
     def generate(
         self,
         model,
@@ -242,7 +366,8 @@ class SOGRPOTrainer(GRPOTrainer):
                             del x0, confidence, transfer_index
             return x
 
-    def forward_process(self, batch, prompt_index, mask_id, seed=None, completion_mask=None):#, trajectory_samples=None):
+    def forward_process(self, batch, prompt_index, mask_id, seed=None, completion_mask=None, generation_mask=None):#, trajectory_samples=None):
+        # Lolo1222: add generation_mask for semi-offline.
         set_seed(seed)
         forward_type = self.args.forward_type # "all", "random", "block_all", "block_random"
         # all: all gen_tokens are masked
@@ -278,6 +403,12 @@ class SOGRPOTrainer(GRPOTrainer):
                 is_mask_completion = ~prompt_index  # all completion tokens are masked
                 is_mask = is_mask_completion
 
+            if generation_mask is not None:
+                # XXX(Lolo1222): need to check! shape?
+                # generation_mask = (masked_generation_ids_get_mask_index == self.args.mask_id).to(torch.bool)     
+                generation_mask_append = torch.cat((torch.zeros(b, num_t, prompt_index.sum(), dtype=torch.bool, device=batch.device), generation_mask.unsqueeze(1).repeat(1, num_t, 1)), dim=2).to(torch.bool)
+                is_mask = is_mask & generation_mask_append
+                
             # Create a noisy (masked) batch
             noisy_batch = torch.where(is_mask, mask_id, batch) # [b, l]
             noisy_batch = noisy_batch.unsqueeze(1) # [b, 1, l]
@@ -307,6 +438,11 @@ class SOGRPOTrainer(GRPOTrainer):
                 is_mask = (is_mask_prompt | is_mask) | ~completion_mask_append
             else:
                 is_mask = is_mask | ~completion_mask_append # mask all tokens after the first EOS token
+            if generation_mask is not None:
+                # XXX(Lolo1222): need to check! shape?
+                # generation_mask = (masked_generation_ids_get_mask_index == self.args.mask_id).to(torch.bool)     
+                generation_mask_append = torch.cat((torch.zeros(b, num_t, prompt_index.sum(), dtype=torch.bool, device=batch.device), generation_mask.unsqueeze(1).repeat(1, num_t, 1)), dim=2).to(torch.bool)
+                is_mask = is_mask & generation_mask_append                
             noisy_batch = torch.where(is_mask, mask_id, batch.unsqueeze(1).repeat(1, num_t, 1)) # [b, num_t, l]
             block_mask = torch.ones((b, num_t, l), dtype=torch.bool, device=batch.device)
         elif forward_type == "block_all":
@@ -336,6 +472,11 @@ class SOGRPOTrainer(GRPOTrainer):
                 is_mask = is_mask_prompt | is_mask
             else:
                 is_mask = is_mask
+            if generation_mask is not None:
+                # XXX(Lolo1222): need to check! shape?
+                # generation_mask = (masked_generation_ids_get_mask_index == self.args.mask_id).to(torch.bool)     
+                generation_mask_append = torch.cat((torch.zeros(b, num_t, prompt_index.sum(), dtype=torch.bool, device=batch.device), generation_mask.unsqueeze(1).repeat(1, num_t, 1)), dim=2).to(torch.bool)
+                is_mask = is_mask & generation_mask_append                
             noisy_batch = torch.where(is_mask, mask_id, batch.unsqueeze(1).repeat(1, num_t, 1)) # [b, num_t, l]
             
         elif forward_type == "block_random":
@@ -370,7 +511,10 @@ class SOGRPOTrainer(GRPOTrainer):
                     # randomly select mask_num tokens to mask for each sequence
                     indices = torch.arange(block_length, device=batch.device).repeat(1, 1, 1) # [1, 1, block_length]
                     is_mask_next = indices < mask_num.unsqueeze(2) # [1, 1, block_length]
+                    
+                    # Mask the mask_block_idx[i, j] block.
                     if mask_block_idx[i, j] == num_blocks - 1 and mask_length == block_length:
+                    # The block is the final block and is completed.
                         is_mask_following[i, j, -(num_blocks - mask_block_idx[i, j]) * block_length:] = is_mask_next[0, 0][torch.randperm(block_length)]
                     else:
                         is_mask_following[i, j, -(num_blocks - mask_block_idx[i, j]) * block_length: -(num_blocks - mask_block_idx[i, j]) * block_length + mask_length] = is_mask_next[0, 0, :mask_length][torch.randperm(mask_length)]
@@ -382,6 +526,11 @@ class SOGRPOTrainer(GRPOTrainer):
                 is_mask = is_mask_prompt | (is_mask & is_mask_following) | ~completion_mask_append
             else:
                 is_mask = (is_mask & is_mask_following) | ~completion_mask_append
+            if generation_mask is not None:
+                # XXX(Lolo1222): need to check! shape?
+                # generation_mask = (masked_generation_ids_get_mask_index == self.args.mask_id).to(torch.bool)     
+                generation_mask_append = torch.cat((torch.zeros(b, num_t, prompt_index.sum(), dtype=torch.bool, device=batch.device), generation_mask.unsqueeze(1).repeat(1, num_t, 1)), dim=2).to(torch.bool)
+                is_mask = is_mask & generation_mask_append
             noisy_batch = torch.where(is_mask, mask_id, batch.unsqueeze(1).repeat(1, num_t, 1)) # [b, num_t, l]
 
         return noisy_batch, block_mask
@@ -436,6 +585,136 @@ class SOGRPOTrainer(GRPOTrainer):
             num_transfer_tokens[mask] += 1
 
         return num_transfer_tokens.to(torch.int64)
+
+    def _get_per_seq_logps_for_semi_offline(self, model, input_ids, logits_to_keep, mask_seeds, generation_mask=None, prompt_mask=None, completion_mask=None, reward_mask=None):
+        """
+        TODO(Lolo1222):
+        Calculate per-token log probabilities for semi-offline generation.
+        """
+        # generation_mask = input_ids["generation_mask"]
+        num_iterations, batch_size, seq_len = input_ids.size()
+        device = input_ids.device
+        per_token_logps = torch.zeros(num_iterations, batch_size, logits_to_keep, device=device)
+
+        # Verify mask_seeds length: one seed per iteration
+        assert (
+            len(mask_seeds) == num_iterations
+        ), f"Expected mask_seeds length to be {num_iterations}, got {len(mask_seeds)}"
+
+        prompt_length = seq_len - logits_to_keep
+        prompt_index = torch.zeros(seq_len, dtype=torch.bool, device=device)
+        prompt_index[:prompt_length] = True  # Mark prompt tokens as True
+
+        # applying masks
+        all_perturbed_seqs = []
+        all_expanded_inputs = []
+        all_block_masks = []
+        for iter_idx, mask_seed in enumerate(mask_seeds):
+            expanded_input = input_ids[iter_idx]  # [batch_size, seq_len]
+            perturbed_seq, block_mask = self.forward_process(
+                expanded_input, prompt_index, self.args.mask_id, seed=mask_seed, completion_mask=completion_mask, generation_mask=generation_mask
+            )
+            all_perturbed_seqs.append(perturbed_seq)
+            all_expanded_inputs.append(expanded_input)
+            all_block_masks.append(block_mask)
+        all_block_masks = torch.cat(all_block_masks, dim=0) # [num_iterations * batch_size, num_t, seq_len]
+        # Concatenate all iterations into a single batch
+        perturbed_seq = torch.cat(all_perturbed_seqs, dim=0)  # [num_iterations * batch_size, num_t, seq_len]
+        perturb_mask = perturbed_seq == self.args.mask_id
+        expanded_input = torch.cat(all_expanded_inputs, dim=0)  # [num_iterations * batch_size, seq_len]
+        if prompt_mask is not None:
+            prompt_mask = torch.cat([prompt_mask]*num_iterations, dim=0)
+
+        # Get model predictions for the combined batch
+        logits = self.get_logits(
+            model, perturbed_seq, prompt_index, self.args.cfg_scale, self.args.mask_id, prompt_mask
+        )  # [num_iterations * batch_size, num_t, seq_len, vocab_size]
+
+        # Calculate cross-entropy loss for completion tokens only
+        completion_logits = logits[
+            :, :, -logits_to_keep:, :
+        ]  # [num_iterations * batch_size, num_t, logits_to_keep, vocab_size]
+        completion_targets = expanded_input[
+            :, -logits_to_keep:
+        ]  # [num_iterations * batch_size, logits_to_keep]
+        perturb_mask = perturb_mask[:, :, -logits_to_keep:]
+        all_block_masks = all_block_masks[:, :, -logits_to_keep:]
+
+        completion_targets = completion_targets.unsqueeze(1).repeat(1, self.args.num_t, 1)
+        flat_logits = completion_logits.reshape(-1, completion_logits.size(-1))
+        flat_targets = completion_targets.reshape(-1)
+        
+        loss = F.cross_entropy(flat_logits, flat_targets, reduction="none")
+        prob = F.softmax(flat_logits, dim=-1).gather(dim=-1, index=flat_targets.unsqueeze(-1))
+        
+        # Convert to log probabilities and reshape
+        completion_log_probs = -loss.view(num_iterations * batch_size, self.args.num_t, logits_to_keep)
+        completion_probs = prob.view(num_iterations * batch_size, self.args.num_t, logits_to_keep)
+        per_token_logps = completion_log_probs.view(num_iterations, batch_size, self.args.num_t, logits_to_keep)
+        per_token_probs = completion_probs.view(num_iterations, batch_size, self.args.num_t, logits_to_keep)
+
+        # Clean up memory
+        del perturbed_seq, logits, all_perturbed_seqs, all_expanded_inputs
+        torch.cuda.empty_cache()
+        per_token_logps = per_token_logps.to(torch.float32)
+        per_token_probs = per_token_probs.to(torch.float32)
+        assert completion_mask is not None
+
+        # all_ref_per_token_logps: num_iterations, batch_size, logits_to_keep
+        # perturb_mask: num_iterations*batch_size, logits_to_keep
+        # completion_mask: batch_size, logits_to_keep
+        completion_mask_expanded = completion_mask.unsqueeze(0).unsqueeze(2).expand(num_iterations, -1, self.args.num_t, -1)
+        perturb_mask_expanded = perturb_mask.view(num_iterations, batch_size, self.args.num_t, logits_to_keep)
+        block_mask_expanded = all_block_masks.view(num_iterations, batch_size, self.args.num_t, logits_to_keep)
+        assert per_token_logps.shape == (num_iterations, batch_size, self.args.num_t, logits_to_keep), f"per_token_logps.shape: {per_token_logps.shape}"
+        assert completion_mask_expanded.shape == (num_iterations, batch_size, self.args.num_t, logits_to_keep), f"completion_mask_expanded.shape: {completion_mask_expanded.shape}"
+        assert perturb_mask_expanded.shape == (num_iterations, batch_size, self.args.num_t, logits_to_keep), f"perturb_mask_expanded.shape: {perturb_mask_expanded.shape}"
+        assert block_mask_expanded.shape == (num_iterations, batch_size, self.args.num_t, logits_to_keep), f"block_mask_expanded.shape: {block_mask_expanded.shape}"
+        
+        # For perturbed tokens, we should weight over instances (sequence-wise)
+        # num_iterations, batch_size, num_t
+        
+        # Check for zero denominators before division
+        denominator = (completion_mask_expanded * perturb_mask_expanded).sum(dim=3)
+        if (denominator == 0).any():
+            print(f"WARNING: Zero denominator detected in per_seq_logps calculation!")
+            print(f"denominator shape: {denominator.shape}")
+            print(f"Zero count: {(denominator == 0).sum()}")
+            print(f"completion_mask_expanded shape: {completion_mask_expanded.shape}")
+            print(f"perturb_mask_expanded shape: {perturb_mask_expanded.shape}")
+            print(f"completion_mask_expanded: {completion_mask_expanded}")
+            print(f"perturb_mask_expanded: {perturb_mask_expanded}")
+            # Add small epsilon to avoid division by zero
+            denominator = torch.clamp(denominator, min=1e-8)
+        
+        per_seq_logps = (per_token_logps * completion_mask_expanded * perturb_mask_expanded).sum(dim=3) / denominator
+        if self.args.logp_estimation == 'eubo' or self.args.logp_estimation == 'mix':
+            empirical_t = (completion_mask_expanded * perturb_mask_expanded).sum(dim=3) / completion_mask_expanded.sum(dim=3)
+            empirical_t_expanded = empirical_t.unsqueeze(3).expand(-1, -1, -1, completion_mask_expanded.size(-1))
+            per_token_avg_ps = per_token_probs.pow(self.args.eubo_beta) * perturb_mask_expanded * completion_mask_expanded / empirical_t_expanded.clamp(min=1e-8)
+            per_token_avg_ps = per_token_avg_ps.mean(dim=2) # [num_iterations, batch_size, logits_to_keep]
+            # set all zero values to 1
+            per_token_avg_ps_dezero = per_token_avg_ps.clone()
+            per_token_avg_ps_dezero[per_token_avg_ps_dezero == 0] = 1
+            loss_mask = (per_token_avg_ps > 0).bool()
+        
+        reward_mask_expanded = reward_mask.unsqueeze(0).expand(num_iterations, -1)
+        per_seq_logps_positive = per_seq_logps.mean(dim=2) # [num_iterations, batch_size]
+        if self.args.logp_estimation == 'eubo':
+            per_seq_logps_negative = (per_token_avg_ps_dezero.log() * loss_mask).sum(dim=2) / loss_mask.sum(dim=2).clamp(min=1e-8) / self.args.eubo_beta
+        elif self.args.logp_estimation == 'mix':
+            per_seq_logps_negative = self.args.mix_weight * (per_token_avg_ps_dezero.log() * loss_mask).sum(dim=2) / loss_mask.sum(dim=2).clamp(min=1e-8) / self.args.eubo_beta + (1-self.args.mix_weight) * per_seq_logps.mean(dim=2)
+        elif self.args.logp_estimation == 'elbo':
+            per_seq_logps_negative = per_seq_logps.mean(dim=2)
+        elif self.args.logp_estimation == 'zero':
+            per_seq_logps_negative = torch.zeros_like(per_seq_logps_positive)
+        else:
+            raise ValueError(f"logp_estimation: {self.args.logp_estimation} is not supported")
+
+        per_seq_logps = reward_mask_expanded.float() * per_seq_logps_positive + (~reward_mask_expanded).float() * per_seq_logps_negative
+        assert per_seq_logps.shape == (num_iterations, batch_size), f"per_seq_logps.shape: {per_seq_logps.shape}"
+
+        return per_seq_logps
 
     def _get_per_seq_logps(self, model, input_ids, logits_to_keep, mask_seeds, prompt_mask=None, completion_mask=None, reward_mask=None):
         """
@@ -569,18 +848,292 @@ class SOGRPOTrainer(GRPOTrainer):
         self, inputs: dict[str, Union[torch.Tensor, Any]]
     ) -> dict[str, Union[torch.Tensor, Any]]:
         mode = "eval" if self.control.should_evaluate else "train"
-        if mode == "train":
-            if self.state.global_step % self.num_iterations == 0:
-                inputs = self._generate_and_score_completions(inputs)
-                self._buffered_inputs[self._step % self.args.gradient_accumulation_steps] = inputs
+        # if self.args.semi_offline_flag is True:
+        # need to use `_generate_and_score_completions_for_semi_offline()`
+        if self.args.semi_offline_flag:
+            if mode == "train":
+                if self.state.global_step % self.num_iterations == 0:
+                    inputs = self._generate_and_score_completions_for_semi_offline(inputs)
+                    self._buffered_inputs[self._step % self.args.gradient_accumulation_steps] = inputs
+                else:
+                    inputs = self._buffered_inputs[self._step % self.args.gradient_accumulation_steps]
+                self._step += 1
             else:
-                inputs = self._buffered_inputs[self._step % self.args.gradient_accumulation_steps]
-            self._step += 1
+                # In evaluation, we don't reuse completions across multiple updates, so we don't need to buffer inputs.
+                inputs = self._generate_and_score_completions_for_semi_offline(inputs)
         else:
-            # In evaluation, we don't reuse completions across multiple updates, so we don't need to buffer inputs.
-            inputs = self._generate_and_score_completions(inputs)
+            if mode == "train":
+                if self.state.global_step % self.num_iterations == 0:
+                    inputs = self._generate_and_score_completions(inputs)
+                    self._buffered_inputs[self._step % self.args.gradient_accumulation_steps] = inputs
+                else:
+                    inputs = self._buffered_inputs[self._step % self.args.gradient_accumulation_steps]
+                self._step += 1
+            else:
+                # In evaluation, we don't reuse completions across multiple updates, so we don't need to buffer inputs.
+                inputs = self._generate_and_score_completions(inputs)
         return inputs
 
+    def _generate_and_score_completions_for_semi_offline(
+        self, inputs: dict[str, Union[torch.Tensor, Any]]
+    ) -> dict[str, Union[torch.Tensor, Any]]:
+        # NOTNEEDTODO(Lolo1222): change advantage calculation to fit semi-offline generation
+        device = self.accelerator.device
+        # DONE(Lolo1222): get masked generations in inputs and tokenize them
+        masked_generations = [x["generation"] for x in inputs]
+        masked_generation_inputs = self.processing_class(
+            text=masked_generations,
+            return_tensors="pt",
+            padding=True,
+            padding_side="left",
+            add_special_tokens=False,
+        )
+        masked_generation_inputs = Trainer._prepare_inputs(self, masked_generation_inputs)
+        masked_generation_ids, masked_generation_mask = masked_generation_inputs["input_ids"], masked_generation_inputs["attention_mask"]
+
+
+         # Prepare prompt inputs
+        prompts = [x["prompt"] for x in inputs]
+        prompts_text = [
+            maybe_apply_chat_template(example, self.processing_class)["prompt"] for example in inputs
+        ]
+        prompt_inputs = self.processing_class(
+            text=prompts_text,
+            return_tensors="pt",
+            padding=True,
+            padding_side="left",
+            add_special_tokens=False,
+        )
+        prompt_inputs = Trainer._prepare_inputs(self, prompt_inputs)
+        prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
+
+        if self.max_prompt_length is not None:
+            prompt_ids = prompt_ids[:, -self.max_prompt_length :]
+            prompt_mask = prompt_mask[:, -self.max_prompt_length :]
+
+        # Configuration for the diffusion generation
+        gen_length = self.args.max_completion_length
+        block_length = self.args.block_length
+        steps = self.args.diffusion_steps
+        temperature = self.args.temperature or 0.0
+        cfg_scale = self.args.cfg_scale
+
+        with unwrap_model_for_generation(self.model_wrapped, self.accelerator) as unwrapped_model:
+            generation_batch_size = self.args.generation_batch_size
+            prompt_completion_ids_all = []
+            # Process in batches
+            for i in range(0, prompt_ids.size(0), generation_batch_size):
+                end_idx = min(i + generation_batch_size, prompt_ids.size(0))
+                batch_prompt_ids = prompt_ids[i:end_idx]
+                batch_prompt_mask = prompt_mask[i:end_idx]
+                batch_masked_generation_ids = masked_generation_ids[i:end_idx]
+                # WARNING: Attention masks are not currently used during generation.
+                # This works fine as we set num_generations == per_device_train_batch_size (no padding tokens created) in our config, but may cause
+                # unintended attention to padding tokens when num_generations is smaller.
+                # As currently we find Llada's modeling file does not handle attention mask. We will address this in future update soon.
+                batch_prompt_completion_ids = self.generate_for_semi_offline(
+                    model=unwrapped_model,
+                    prompt=batch_prompt_ids,
+                    masked_generation=batch_masked_generation_ids,
+                    steps=steps,
+                    gen_length=gen_length,
+                    block_length=block_length,
+                    temperature=temperature,
+                    cfg_scale=cfg_scale,
+                    remasking=self.args.remasking,
+                    mask_id=self.args.mask_id,
+                    prompt_mask=batch_prompt_mask,
+                )
+                    # masked_generation_mask=batch_masked_generation_mask,
+                prompt_completion_ids_all.append(batch_prompt_completion_ids)
+
+                del batch_prompt_ids, batch_prompt_mask, batch_prompt_completion_ids
+                torch.cuda.empty_cache()
+
+            prompt_completion_ids = torch.cat(prompt_completion_ids_all, dim=0)
+
+        # Compute prompt length and extract completion ids
+        prompt_length = prompt_ids.size(1)
+        prompt_ids = prompt_completion_ids[:, :prompt_length]
+        completion_ids = prompt_completion_ids[:, prompt_length:]
+
+        # Mask everything after the first EOS token (but keep the first EOS token!)
+        is_eos = completion_ids == self.processing_class.eos_token_id
+        eos_idx = torch.full((is_eos.size(0),), is_eos.size(1), dtype=torch.long, device=device)
+        eos_idx[is_eos.any(dim=1)] = is_eos.int().argmax(dim=1)[is_eos.any(dim=1)]
+        sequence_indices = torch.arange(is_eos.size(1), device=device).expand(is_eos.size(0), -1)
+        completion_mask = (sequence_indices <= eos_idx.unsqueeze(1)).int()
+
+        logits_to_keep = completion_ids.size(
+            1
+        )  # we only need to compute the logits for the completion tokens
+        if self.args.random_masking:
+            # use random seeds for every iterations in GRPO iterations
+            mask_seeds = torch.randint(0, 2**12, (self.num_iterations,), device=device)
+        else:
+            # use fixed seeds for every iterations in GRPO iterations
+            mask_seeds = [42] * self.num_iterations
+
+       
+        completions_text = self.processing_class.batch_decode(completion_ids, skip_special_tokens=True)
+        if is_conversational(inputs[0]):
+            completions = []
+            for prompt, completion in zip(prompts, completions_text):
+                bootstrap = prompt.pop()["content"] if prompt[-1]["role"] == "assistant" else ""
+                completions.append([{"role": "assistant", "content": bootstrap + completion}])
+        else:
+            completions = completions_text
+
+        rewards_per_func = torch.zeros(len(prompts), len(self.reward_funcs), device=device)
+        for i, (reward_func, reward_processing_class) in enumerate(
+            zip(self.reward_funcs, self.reward_processing_classes)
+        ):
+            if isinstance(
+                reward_func, nn.Module
+            ):  # Module instead of PretrainedModel for compat with compiled models
+                reward_func_name = f"reward {reward_func.config._name_or_path.split('/')[-1]}"
+            else:
+                reward_func_name = reward_func.__name__
+            with profiling_context(self, reward_func_name):
+
+                # Repeat all input columns (but "prompt" and "completion") to match the number of generations
+                keys = [key for key in inputs[0] if key not in ["prompt", "completion"]]
+                reward_kwargs = {key: [example[key] for example in inputs] for key in keys}
+                output_reward_func = reward_func(
+                    prompts=prompts,
+                    completions=completions,
+                    step=self._step,
+                    run_name=self.args.output_dir,
+                    **reward_kwargs,
+                )
+                # Convert None values to NaN
+                output_reward_func = [
+                    reward if reward is not None else torch.nan for reward in output_reward_func
+                ]
+
+                rewards_per_func[:, i] = torch.tensor(output_reward_func, dtype=torch.float32, device=device)
+
+        # If all reward functions return None for a given row, issue a detailed warning
+        if torch.isnan(rewards_per_func).all(dim=1).any():
+            nan_row_idx = torch.isnan(rewards_per_func).all(dim=1).nonzero(as_tuple=True)[0][0]
+            row_reward_kwargs = {key: value[nan_row_idx] for key, value in reward_kwargs.items()}
+            row_reward_kwargs["prompt"] = prompts[nan_row_idx]
+            row_reward_kwargs["completion"] = completions[nan_row_idx]
+            warnings.warn(
+                f"All reward functions returned None for the following kwargs: {row_reward_kwargs}. "
+                "Please ensure that at least one reward function returns a valid reward."
+            )
+
+        rewards_per_func = gather(rewards_per_func)
+        rewards = (rewards_per_func * self.reward_weights.to(device).unsqueeze(0)).nansum(dim=1)
+        process_slice = slice(
+            self.accelerator.process_index * len(prompts),
+            (self.accelerator.process_index + 1) * len(prompts),
+        )
+
+        mean_grouped_rewards = rewards.view(-1, self.num_generations).mean(dim=1)
+        # Normalize the rewards to compute the advantages
+        mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
+        advantages = rewards - mean_grouped_rewards
+        reward_mask = (advantages[process_slice] > 0).bool()
+
+
+        # Lolo1222: asume num_iterations == batch_size
+        # XXX(Lolo1222): build generation_mask in gpu temperately
+        # Build generation_mask: 1 where token != mask_id, else 0
+        # Ensure masked_generation_ids matches gen_length (pad/truncate) and move to device
+        # ***************** generation_mask *****************
+        if masked_generation_ids.size(1) < gen_length:
+            pad_len = gen_length - masked_generation_ids.size(1)
+            padding = torch.full(
+            (masked_generation_ids.size(0), pad_len),
+            self.args.mask_id,
+            dtype=masked_generation_ids.dtype,
+            device=device,
+            )
+            masked_generation_ids_get_mask_index = torch.cat([masked_generation_ids.to(device), padding], dim=1)
+        else:
+            masked_generation_ids_get_mask_index = masked_generation_ids.to(device)[:, :gen_length]
+
+        generation_mask = (masked_generation_ids_get_mask_index == self.args.mask_id).to(torch.bool)     
+        # ***************** generation_mask *****************
+
+        with torch.no_grad():
+            if self.num_iterations > 1:
+                # repeat prompt completion ids self.num_iterations times
+                prompt_completion_ids_expanded = prompt_completion_ids.unsqueeze(0).expand(
+                    self.num_iterations, -1, -1
+                )
+
+            if self.beta == 0.0:
+                all_ref_per_seq_logps = None
+            else:
+                with self.accelerator.unwrap_model(self.model).disable_adapter():
+                    ref_per_seq_logps = self._get_per_seq_logps_for_semi_offline(
+                        self.model, prompt_completion_ids_expanded, logits_to_keep, mask_seeds, generation_mask, prompt_mask, completion_mask, reward_mask#, trajectory_samples
+                    )
+                    all_ref_per_seq_logps = ref_per_seq_logps
+
+        advantages = advantages[process_slice]
+
+        # Log the metrics
+        mode = "eval" if self.control.should_evaluate else "train"
+
+        completion_length = self.accelerator.gather_for_metrics(completion_mask.sum(1)).float().mean().item()
+        self._metrics[mode]["completion_length"].append(completion_length)
+
+        # Calculate mean reward per function, but only for samples where the function was applied
+        for i, reward_func in enumerate(self.reward_funcs):
+            if isinstance(
+                reward_func, nn.Module
+            ):  # Module instead of PretrainedModel for compat with compiled models
+                reward_func_name = reward_func.config._name_or_path.split("/")[-1]
+            else:
+                reward_func_name = reward_func.__name__
+            # Only calculate mean for samples where this reward function was applied (non-NaN values)
+            mean_rewards = torch.nanmean(rewards_per_func[:, i]).item()
+            self._metrics[mode][f"rewards/{reward_func_name}"].append(mean_rewards)
+        self._metrics[mode]["reward"].append(rewards.mean().item())
+
+        if self.log_completions and self.state.global_step % self.args.logging_steps == 0:
+            prompts_to_log = gather_object(prompts_text)
+            completions_to_log = gather_object(completions_text)
+            rewards_to_log = rewards.tolist()
+
+            if self.accelerator.is_main_process:
+                if is_rich_available():
+                    print_prompt_completions_sample(
+                        prompts_to_log,
+                        completions_to_log,
+                        rewards_to_log,
+                        self.state.global_step,
+                    )
+                if self.args.report_to and "wandb" in self.args.report_to and wandb.run is not None:
+                    import pandas as pd
+
+                    # For logging
+                    table = {
+                        "step": [str(self.state.global_step)] * len(rewards),
+                        "prompt": prompts_to_log,
+                        "completion": completions_to_log,
+                        "reward": rewards.tolist(),
+                    }
+                    df = pd.DataFrame(table)
+                    wandb.log({"completions": wandb.Table(dataframe=df)})
+
+        return {
+            "prompt_ids": prompt_ids,
+            "prompt_mask": prompt_mask,
+            "completion_ids": completion_ids,
+            "completion_mask": completion_mask,
+            "ref_per_seq_logps": all_ref_per_seq_logps, # num_iterations, batch_size
+            "advantages": advantages,
+            "mask_seeds": mask_seeds,  # Store all mask seeds for consistent mask patterns
+            "reward_mask": reward_mask,
+            "generation_mask": generation_mask, # Lolo1222: add generation_mask to inputs
+        }
+
+    
     def _generate_and_score_completions(
         self, inputs: dict[str, Union[torch.Tensor, Any]]
     ) -> dict[str, Union[torch.Tensor, Any]]:

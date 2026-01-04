@@ -425,4 +425,29 @@ class DiffuGRPOConfig(TrainingArguments):
         default=0,
         metadata={"help": "Number of few-shot examples to use for sudoku_new dataset."},
     )
+    # Semi-offline config and early stop rollouting config
+    semi_offline_flag: Optional[bool] = field(
+        default=False,
+        metadata={"help": "Whether to use semi-offline data."},
+    )
+    semi_offline_data_path: Optional[str] = field(
+        default="",
+        metadata={"help": "Path to semi-offline data."},
+    )
+    semi_offline_ratio: Optional[float] = field(
+        default=0.0,
+        metadata={"help": "Ratio of semi-offline data to use."},
+    )
+    semi_offline_strategy: Optional[str] = field(
+        default="random",
+        metadata={"help": "Masking strategy for semi-offline data. 'random' or 'low_confidence'."},
+    )
+    early_stop_rollout_flag: Optional[bool] = field(
+        default=False,
+        metadata={"help": "Whether to use early stop rollout."},
+    )
+    early_stop_threshold: Optional[float] = field(
+        default=0.0,
+        metadata={"help": "Threshold for early stop rollout."},
+    )
     

@@ -7,9 +7,10 @@ from glob import glob
 
 # Config
 input_paths = []
-# input_paths += glob("deal_data/math01/*.jsonl")
-input_paths += glob("deal_data/math01/llada_math_generations.jsonl")
-input_paths += glob("deal_data/math02/llada_math_generations_rank*.jsonl")
+input_paths += glob("deal_data/llada_math_generations_all_sorted.jsonl")
+input_paths += glob("deal_data/llada_math_generations_rank*.jsonl")
+# input_paths += glob("deal_data/math01/llada_math_generations.jsonl")
+# input_paths += glob("deal_data/math02/llada_math_generations_rank*.jsonl")
 output_jsonl = "deal_data/math_merged.jsonl"
 output_summary = "deal_data/math_merged_summary.json"
 seed = 42  # 若需可设置为整数以复现，例如 seed = 42

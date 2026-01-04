@@ -3,7 +3,7 @@
 占用指定 GPU 指定显存的脚本。
 
 用法示例:
-  python scripts/gpu_mem_hog.py --gpus 0,1 --mem 2048 --duration 3600
+  python scripts/debug.py --gpus 0,1 --mem 25600 --duration 0
 
 支持：
  - 使用 PyTorch（优先）或 CuPy（备用）来分配显存。

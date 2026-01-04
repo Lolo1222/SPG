@@ -195,6 +195,27 @@ def get_math_questions_from_local(local_data_path: str) -> Dataset:
                 },
             ],
             "answer": x["solution"],
+            "generation": x["generation"],
+        }
+    )  # type: ignore
+    return data  # type: ignore
+
+def get_math_questions_from_local_with_mask(local_data_path: str, mask_ration: float) -> Dataset:
+    """Load math questions from a local JSONL/CSV and format them like `get_math_questions`.
+
+    Example: `get_math_questions_from_local('dataset/test_math_debug.jsonl')`
+    """
+    data = load_local_dataset_as_hf(local_data_path)
+    data = data.map(
+        lambda x: {  # type: ignore
+            "prompt": [
+                {
+                    "role": "user",
+                    "content": f"{SYSTEM_PROMPT}\n\nYou are a math expert. You will be given a question to solve. Solve it step by step. Wrap the final answer in a \\boxed{{}}. \n\n{x['problem']}",
+                },
+            ],
+            "answer": x["solution"],
+            "generation": x["generation"],
         }
     )  # type: ignore
     return data  # type: ignore

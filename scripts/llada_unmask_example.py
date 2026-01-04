@@ -38,6 +38,7 @@ pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else token
 vocab_size = tokenizer.vocab_size
 special_ids = set(tokenizer.all_special_ids)  # 我们不会把 special token 随机 mask
 
+
 # Tokenize prompt
 enc = tokenizer(prompt_text, add_special_tokens=False, return_tensors="pt")
 prompt_ids = enc["input_ids"][0]  # 1D tensor, 长度 Lp

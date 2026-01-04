@@ -10,9 +10,11 @@ from trl import TrlParser, ModelConfig
 from peft import LoraConfig
 
 # Custom imports
+from maskd_data_utils import generate_masked_sequence
 from spg.diffu_grpo_trainer import DiffuGRPOTrainer
 from spg.spg_trainer import SPGTrainer
 from spg.so_trainer import SOTrainer
+from spg.so_grpo_trainer import SOGRPOTrainer
 from spg.diffu_grpo_config import DiffuGRPOConfig
 from spg.reward_func import (
     xmlcount_reward_func,
@@ -145,36 +147,52 @@ def main(grpo_config, model_config):
     # Set seed for reproducibility
     set_random_seed(grpo_config.seed)
 
+    tokenizer = AutoTokenizer.from_pretrained(grpo_config.model_path, trust_remote_code=True)
+    tokenizer.pad_token = tokenizer.eos_token
     # Load dataset based on configuration
-    if grpo_config.dataset == "gsm8k":
-        dataset = get_gsm8k_questions("train")
-        reward_functions = [
-            xmlcount_reward_func,
-            soft_format_reward_func,
-            strict_format_reward_func,
-            int_reward_func,
-            correctness_reward_func,
-        ]
-    elif grpo_config.dataset == "countdown":
-        dataset = get_countdown_questions("train")
-        reward_functions = [countdown_reward_func]
-    # elif grpo_config.dataset == "sudoku":
-    #     dataset = get_sudoku_questions()
-    #     reward_functions = [sudoku_reward_func]
-    elif grpo_config.dataset == "sudoku_new":
-        dataset = get_sudoku_questions_new(few_shot=grpo_config.few_shot)
-        reward_functions = [sudoku_reward_func]
-    elif grpo_config.dataset == "math":
-        # Prefer a local dataset path from grpo_config.local_data_path (if provided).
-        local_path = getattr(grpo_config, "local_data_path", None)
-        if local_path:
-            dataset = get_math_questions_from_local(local_path)
-        else:
-            dataset = get_math_questions("train")
+    # If semi-offline used, we will load dataset with generated sequences from local path
+    # XXX(Lolo1222): currently only math dataset supports semi-offline mode
+    if getattr(grpo_config, "semi_offline_flag", False):
+        print(f"=== Using semi-offline dataset from {grpo_config.semi_offline_data_path} ===")
+        original_dataset = get_math_questions_from_local(grpo_config.semi_offline_data_path)
+        dataset = generate_masked_sequence(original_dataset, tokenizer, p_question_mask=0, p_gen_mask=grpo_config.semi_offline_ratio, seed=grpo_config.seed, gen_masking_strategy=grpo_config.semi_offline_strategy)
         reward_functions = [
             correctness_reward_func_math,
             boxed_and_answer_tags_format_reward,
         ]
+
+        
+    else:
+        print(f"=== Using online dataset: {grpo_config.dataset} ===")
+        if grpo_config.dataset == "gsm8k":
+            dataset = get_gsm8k_questions("train")
+            reward_functions = [
+                xmlcount_reward_func,
+                soft_format_reward_func,
+                strict_format_reward_func,
+                int_reward_func,
+                correctness_reward_func,
+            ]
+        elif grpo_config.dataset == "countdown":
+            dataset = get_countdown_questions("train")
+            reward_functions = [countdown_reward_func]
+        # elif grpo_config.dataset == "sudoku":
+        #     dataset = get_sudoku_questions()
+        #     reward_functions = [sudoku_reward_func]
+        elif grpo_config.dataset == "sudoku_new":
+            dataset = get_sudoku_questions_new(few_shot=grpo_config.few_shot)
+            reward_functions = [sudoku_reward_func]
+        elif grpo_config.dataset == "math":
+            # Prefer a local dataset path from grpo_config.local_data_path (if provided).
+            local_path = getattr(grpo_config, "local_data_path", None)
+            if local_path:
+                dataset = get_math_questions_from_local(local_path)
+            else:
+                dataset = get_math_questions("train")
+            reward_functions = [
+                correctness_reward_func_math,
+                boxed_and_answer_tags_format_reward,
+            ]
 
     # Shuffle dataset with fixed seed for reproducibility
     dataset = dataset.shuffle(seed=grpo_config.seed)
@@ -186,8 +204,7 @@ def main(grpo_config, model_config):
         train_set = dataset
 
     # Set up device
-    device = torch.device("cpu")
-    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # 4 bit quantization configuration
     bnb_config = BitsAndBytesConfig(
@@ -205,8 +222,6 @@ def main(grpo_config, model_config):
         quantization_config=bnb_config,
     ).to(device)
 
-    tokenizer = AutoTokenizer.from_pretrained(grpo_config.model_path, trust_remote_code=True)
-    tokenizer.pad_token = tokenizer.eos_token
     model.config.use_cache = False
 
     # Configure LoRA for parameter-efficient fine-tuning
@@ -235,7 +250,7 @@ def main(grpo_config, model_config):
             train_dataset=train_set,
         )
     elif grpo_config.trainer == "so":
-        trainer = SOTrainer(
+        trainer = SOGRPOTrainer(
             args=grpo_config,
             model=model,
             peft_config=peft_config,

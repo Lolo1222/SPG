@@ -83,11 +83,25 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 # Save dir: under repo save_dir, create a per-run folder spg_eubo_<timestamp>
 SAVE_DIR_BASE="${REPO_ROOT}/save_dir"
-SAVE_DIR="${SAVE_DIR_BASE}/spg_so_elbo_${TIMESTAMP}"
+SAVE_DIR="${SAVE_DIR_BASE}/d1_${TIMESTAMP}"
+# If RESUME_DIR is set, use it as SAVE_DIR (resume run) and ensure it exists
+if [ -n "${RESUME_DIR:-}" ]; then
+  if [ -d "${RESUME_DIR}" ]; then
+    echo "RESUME_DIR set, resuming from: ${RESUME_DIR}"
+    SAVE_DIR="${RESUME_DIR}"
+  else
+    echo "ERROR: RESUME_DIR=${RESUME_DIR} does not exist" >&2
+    exit 1
+  fi
+fi
+
 mkdir -p "$SAVE_DIR"
 
+# Export CHECKPOINT_DIR so the training script will search this directory for checkpoints
+export CHECKPOINT_DIR="$SAVE_DIR"
+
 DATASET="math"
-RUN_NAME=${DATASET}_base_spg_so_elbo_beta1.5
+RUN_NAME=${DATASET}_base_d1_beta1.5
 # Use a shared model path under repo save_dir/hf_models (not inside per-run folder)
 MODEL_PATH="${REPO_ROOT}/save_dir/hf_models/LLaDA-8B-Instruct"
 # Allow overriding for quick smoke-tests
@@ -96,7 +110,7 @@ PER_DEVICE_TRAIN_BATCH_SIZE="${PER_DEVICE_TRAIN_BATCH_SIZE:-6}"
 GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-2}"
 
 # timestamped logfile (use same timestamp as SAVE_DIR)
-LOGFILE="${LOGDIR}/spg_eulo_${TIMESTAMP}.out"
+LOGFILE="${LOGDIR}/d1_${TIMESTAMP}.out"
 echo "Logging to $LOGFILE"
 
 # Run accelerate directly (no srun / SLURM). Adjust --config_file and script path if needed.
@@ -152,7 +166,7 @@ ACCEL_CMD=("${ACCEL_BASE[@]}"
   --dataset "$DATASET"
   --run_name "$RUN_NAME"
   --output_dir "${SAVE_DIR}"
-  --trainer so
+  --trainer diffu_grpo
   --forward_type block_random
   --num_t 2
   --min_t 0
@@ -161,7 +175,7 @@ ACCEL_CMD=("${ACCEL_BASE[@]}"
   --per_device_train_batch_size ${PER_DEVICE_TRAIN_BATCH_SIZE}
   --gradient_accumulation_steps ${GRADIENT_ACCUMULATION_STEPS}
   --beta 0.0
-  --logp_estimation elbo
+  --logp_estimation eubo
   --eubo_beta 1.5)
 
 echo
