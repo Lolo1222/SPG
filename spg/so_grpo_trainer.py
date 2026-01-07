@@ -93,6 +93,8 @@ class SOGRPOTrainer(GRPOTrainer):
 
     @profiling_decorator
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        # TODO(Lolo1222): check if inputs can satisfy default cal func(0 not, positive yes)
+        # print(f"Current inputs FLOS: {self.floating_point_ops(inputs)}")
         if return_outputs:
             raise ValueError("The GRPOTrainer does not support returning outputs")
         # Compute the per-token log probabilities for the model
@@ -112,7 +114,8 @@ class SOGRPOTrainer(GRPOTrainer):
         input_ids = input_ids.unsqueeze(0)
         if self.args.semi_offline_flag:
             generation_mask = inputs["generation_mask"]
-            per_seq_logps = self._get_per_seq_logps_for_semi_offline(model, input_ids, logits_to_keep, [this_itr_mask_seed], generation_mask, prompt_mask, completion_mask, reward_mask=inputs['reward_mask']) # num_iterations, batch_size
+            early_rollout_token_index = inputs["early_rollout_token_index"]
+            per_seq_logps = self._get_per_seq_logps_for_semi_offline(model, input_ids, logits_to_keep, [this_itr_mask_seed], generation_mask, early_rollout_token_index, prompt_mask, completion_mask, reward_mask=inputs['reward_mask']) # num_iterations, batch_size
         else:
             per_seq_logps = self._get_per_seq_logps(model, input_ids, logits_to_keep, [this_itr_mask_seed], prompt_mask, completion_mask, reward_mask=inputs['reward_mask']) # num_iterations, batch_size
         
@@ -156,6 +159,8 @@ class SOGRPOTrainer(GRPOTrainer):
         model,
         prompt,
         masked_generation,
+        early_stop_rollout_flag=False,
+        early_stop_threshold=0.85,
         steps=128,
         gen_length=128,
         block_length=128,
@@ -166,13 +171,24 @@ class SOGRPOTrainer(GRPOTrainer):
         prompt_mask=None,
         # return_trajectory_samples=False,
     ):
+        still_masked_index = None
         # Lolo1222: if masked_generation length > gen_length, we only generate gen_length tokens and give a warning
         if masked_generation.size(1) > gen_length:
             print(f"WARNING: masked_generation length {masked_generation.size(1)} > gen_length {gen_length}, only generating first {gen_length} tokens.")
             masked_generation = masked_generation[:, :gen_length]
         with torch.cuda.amp.autocast(enabled=True):
+
             bs = prompt.shape[0]
             dtype = model.dtype
+
+            # TODO(Lolo1222): early_stop_rollout
+            if early_stop_rollout_flag:
+                early_stop_token_num = int(early_stop_threshold * gen_length)
+            total_gen_token_counts = [0 for i in range(bs)]
+            masked_generation_notmask_token_counts = [sum((masked_generation[bi]!=mask_id).int()).item() for bi in range(bs)]
+            # Lolo1222: for early stop rollout
+            early_stop_flag = [False for i in range(bs)]
+
             x = torch.full((bs, prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
             x[:, : prompt.shape[1]] = prompt.clone()
             # Lolo1222: give the masked_generation to the generation part
@@ -204,7 +220,10 @@ class SOGRPOTrainer(GRPOTrainer):
                 steps_per_block_list.append(normalized)
 
 
+
             for num_block in range(num_blocks):
+                if early_stop_rollout_flag and all(early_stop_flag):
+                    break                
                 start_idx = prompt.shape[1] + num_block * block_length
                 end_idx = prompt.shape[1] + (num_block + 1) * block_length
 
@@ -214,8 +233,9 @@ class SOGRPOTrainer(GRPOTrainer):
 
                 for i in range(steps_per_block_list[num_block][0].item()):
                     torch.cuda.empty_cache()
+                    if early_stop_rollout_flag and all(early_stop_flag):
+                        break
                     mask_index = x == mask_id
-
                     if hasattr(torch.cuda, "amp") and hasattr(torch.cuda.amp, "autocast"):
                         with torch.cuda.amp.autocast(enabled=self.args.fp16):
                             # Handle classifier-free guidance more efficiently
@@ -261,14 +281,57 @@ class SOGRPOTrainer(GRPOTrainer):
                             # Select tokens to transfer based on confidence
                             transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=x0.device)
                             for j in range(confidence.shape[0]):
+                                # Lolo1222: this 'if' never used.
+                                if early_stop_rollout_flag and all(early_stop_flag):
+                                    break
+
                                 num_tokens = num_transfer_tokens[j, i].item()
+                                if early_stop_rollout_flag:
+                                    if total_gen_token_counts[j] + num_tokens + masked_generation_notmask_token_counts[j] > early_stop_token_num:
+                                        num_tokens = early_stop_token_num - total_gen_token_counts[j] - masked_generation_notmask_token_counts[j]
+                                        early_stop_flag[j] = True
+                                total_gen_token_counts[j] += num_tokens
                                 if num_tokens > 0:
                                     _, select_index = torch.topk(confidence[j], k=num_tokens)
                                     transfer_index[j, select_index] = True
 
                             x[transfer_index] = x0[transfer_index]
                             del x0, confidence, transfer_index
-            return x
+            
+            if early_stop_rollout_flag and all(early_stop_flag):
+                # print(f"Early stop rollout at total_gen_token_counts: {total_gen_token_counts}")
+                still_masked_index = x == mask_id
+                if hasattr(torch.cuda, "amp") and hasattr(torch.cuda.amp, "autocast"):
+                    with torch.cuda.amp.autocast(enabled=self.args.fp16):
+                        # Handle classifier-free guidance more efficiently
+                        if cfg_scale > 0.0:
+                            un_x = x.clone()
+                            un_x[prompt_index] = mask_id
+                            x_ = torch.cat([x, un_x], dim=0)
+
+                            # Get logits in a single forward pass
+                            logits = model(x_, attention_mask=prompt_mask).logits
+                            logits, un_logits = torch.chunk(logits, 2, dim=0)
+                            logits = un_logits + (cfg_scale + 1) * (logits - un_logits)
+                        else:
+                            # XXX(Lolo1222): only non masked tokens have logits? NO!
+                            logits = model(x, attention_mask=prompt_mask).logits
+
+                        # Apply Gumbel noise for sampling
+                        logits_with_noise = self.add_gumbel_noise(
+                            logits, temperature=temperature, dtype=dtype
+                        )
+                        x0 = torch.argmax(logits_with_noise, dim=-1)
+                        del logits_with_noise
+
+                        x = torch.where(still_masked_index, x0, x)
+
+                        del x0
+                        early_rollout_token_index = still_masked_index
+                        # early_rollout_token_index = still_masked_index[:, prompt.shape[1]:]
+            else:
+                early_rollout_token_index = None
+            return x, early_rollout_token_index
     def generate(
         self,
         model,
@@ -366,7 +429,7 @@ class SOGRPOTrainer(GRPOTrainer):
                             del x0, confidence, transfer_index
             return x
 
-    def forward_process(self, batch, prompt_index, mask_id, seed=None, completion_mask=None, generation_mask=None):#, trajectory_samples=None):
+    def forward_process(self, batch, prompt_index, mask_id, seed=None, completion_mask=None, generation_mask=None, early_rollout_token_index=None):#, trajectory_samples=None):
         # Lolo1222: add generation_mask for semi-offline.
         set_seed(seed)
         forward_type = self.args.forward_type # "all", "random", "block_all", "block_random"
@@ -408,6 +471,8 @@ class SOGRPOTrainer(GRPOTrainer):
                 # generation_mask = (masked_generation_ids_get_mask_index == self.args.mask_id).to(torch.bool)     
                 generation_mask_append = torch.cat((torch.zeros(b, num_t, prompt_index.sum(), dtype=torch.bool, device=batch.device), generation_mask.unsqueeze(1).repeat(1, num_t, 1)), dim=2).to(torch.bool)
                 is_mask = is_mask & generation_mask_append
+            if early_rollout_token_index is not None:
+                is_mask = is_mask & ~early_rollout_token_index
                 
             # Create a noisy (masked) batch
             noisy_batch = torch.where(is_mask, mask_id, batch) # [b, l]
@@ -443,6 +508,8 @@ class SOGRPOTrainer(GRPOTrainer):
                 # generation_mask = (masked_generation_ids_get_mask_index == self.args.mask_id).to(torch.bool)     
                 generation_mask_append = torch.cat((torch.zeros(b, num_t, prompt_index.sum(), dtype=torch.bool, device=batch.device), generation_mask.unsqueeze(1).repeat(1, num_t, 1)), dim=2).to(torch.bool)
                 is_mask = is_mask & generation_mask_append                
+            if early_rollout_token_index is not None:
+                is_mask = is_mask & ~early_rollout_token_index            
             noisy_batch = torch.where(is_mask, mask_id, batch.unsqueeze(1).repeat(1, num_t, 1)) # [b, num_t, l]
             block_mask = torch.ones((b, num_t, l), dtype=torch.bool, device=batch.device)
         elif forward_type == "block_all":
@@ -477,8 +544,10 @@ class SOGRPOTrainer(GRPOTrainer):
                 # generation_mask = (masked_generation_ids_get_mask_index == self.args.mask_id).to(torch.bool)     
                 generation_mask_append = torch.cat((torch.zeros(b, num_t, prompt_index.sum(), dtype=torch.bool, device=batch.device), generation_mask.unsqueeze(1).repeat(1, num_t, 1)), dim=2).to(torch.bool)
                 is_mask = is_mask & generation_mask_append                
-            noisy_batch = torch.where(is_mask, mask_id, batch.unsqueeze(1).repeat(1, num_t, 1)) # [b, num_t, l]
             
+            if early_rollout_token_index is not None:
+                is_mask = is_mask & ~early_rollout_token_index            
+            noisy_batch = torch.where(is_mask, mask_id, batch.unsqueeze(1).repeat(1, num_t, 1)) # [b, num_t, l]
         elif forward_type == "block_random":
             b, l = batch.shape
             gen_length = (l - prompt_index.sum()).item()
@@ -531,8 +600,10 @@ class SOGRPOTrainer(GRPOTrainer):
                 # generation_mask = (masked_generation_ids_get_mask_index == self.args.mask_id).to(torch.bool)     
                 generation_mask_append = torch.cat((torch.zeros(b, num_t, prompt_index.sum(), dtype=torch.bool, device=batch.device), generation_mask.unsqueeze(1).repeat(1, num_t, 1)), dim=2).to(torch.bool)
                 is_mask = is_mask & generation_mask_append
-            noisy_batch = torch.where(is_mask, mask_id, batch.unsqueeze(1).repeat(1, num_t, 1)) # [b, num_t, l]
 
+            if early_rollout_token_index is not None:
+                is_mask = is_mask & ~early_rollout_token_index.unsqueeze(1).repeat(1, num_t, 1)
+            noisy_batch = torch.where(is_mask, mask_id, batch.unsqueeze(1).repeat(1, num_t, 1)) # [b, num_t, l]
         return noisy_batch, block_mask
 
     def get_logits(self, model, batch, prompt_index, cfg_scale, mask_id, prompt_mask=None):
@@ -586,7 +657,7 @@ class SOGRPOTrainer(GRPOTrainer):
 
         return num_transfer_tokens.to(torch.int64)
 
-    def _get_per_seq_logps_for_semi_offline(self, model, input_ids, logits_to_keep, mask_seeds, generation_mask=None, prompt_mask=None, completion_mask=None, reward_mask=None):
+    def _get_per_seq_logps_for_semi_offline(self, model, input_ids, logits_to_keep, mask_seeds, generation_mask=None, early_rollout_token_index=None, prompt_mask=None, completion_mask=None, reward_mask=None):
         """
         TODO(Lolo1222):
         Calculate per-token log probabilities for semi-offline generation.
@@ -612,7 +683,7 @@ class SOGRPOTrainer(GRPOTrainer):
         for iter_idx, mask_seed in enumerate(mask_seeds):
             expanded_input = input_ids[iter_idx]  # [batch_size, seq_len]
             perturbed_seq, block_mask = self.forward_process(
-                expanded_input, prompt_index, self.args.mask_id, seed=mask_seed, completion_mask=completion_mask, generation_mask=generation_mask
+                expanded_input, prompt_index, self.args.mask_id, seed=mask_seed, completion_mask=completion_mask, generation_mask=generation_mask, early_rollout_token_index=early_rollout_token_index
             )
             all_perturbed_seqs.append(perturbed_seq)
             all_expanded_inputs.append(expanded_input)
@@ -921,6 +992,7 @@ class SOGRPOTrainer(GRPOTrainer):
         with unwrap_model_for_generation(self.model_wrapped, self.accelerator) as unwrapped_model:
             generation_batch_size = self.args.generation_batch_size
             prompt_completion_ids_all = []
+            early_rollout_token_index_all = []
             # Process in batches
             for i in range(0, prompt_ids.size(0), generation_batch_size):
                 end_idx = min(i + generation_batch_size, prompt_ids.size(0))
@@ -931,10 +1003,12 @@ class SOGRPOTrainer(GRPOTrainer):
                 # This works fine as we set num_generations == per_device_train_batch_size (no padding tokens created) in our config, but may cause
                 # unintended attention to padding tokens when num_generations is smaller.
                 # As currently we find Llada's modeling file does not handle attention mask. We will address this in future update soon.
-                batch_prompt_completion_ids = self.generate_for_semi_offline(
+                batch_prompt_completion_ids, batch_early_rollout_token_index = self.generate_for_semi_offline(
                     model=unwrapped_model,
                     prompt=batch_prompt_ids,
                     masked_generation=batch_masked_generation_ids,
+                    early_stop_rollout_flag=self.args.early_stop_rollout_flag,
+                    early_stop_threshold=self.args.early_stop_threshold,
                     steps=steps,
                     gen_length=gen_length,
                     block_length=block_length,
@@ -946,11 +1020,17 @@ class SOGRPOTrainer(GRPOTrainer):
                 )
                     # masked_generation_mask=batch_masked_generation_mask,
                 prompt_completion_ids_all.append(batch_prompt_completion_ids)
+                early_rollout_token_index_all.append(batch_early_rollout_token_index)
 
                 del batch_prompt_ids, batch_prompt_mask, batch_prompt_completion_ids
                 torch.cuda.empty_cache()
 
             prompt_completion_ids = torch.cat(prompt_completion_ids_all, dim=0)
+            if self.args.early_stop_rollout_flag:
+                assert early_rollout_token_index_all[0] is not None, "early_rollout_token_index_all[0] is None"
+                early_rollout_token_index = torch.cat(early_rollout_token_index_all, dim=0)
+            else:
+                early_rollout_token_index = None
 
         # Compute prompt length and extract completion ids
         prompt_length = prompt_ids.size(1)
@@ -1070,7 +1150,7 @@ class SOGRPOTrainer(GRPOTrainer):
             else:
                 with self.accelerator.unwrap_model(self.model).disable_adapter():
                     ref_per_seq_logps = self._get_per_seq_logps_for_semi_offline(
-                        self.model, prompt_completion_ids_expanded, logits_to_keep, mask_seeds, generation_mask, prompt_mask, completion_mask, reward_mask#, trajectory_samples
+                        self.model, prompt_completion_ids_expanded, logits_to_keep, mask_seeds, generation_mask, early_rollout_token_index, prompt_mask, completion_mask, reward_mask#, trajectory_samples
                     )
                     all_ref_per_seq_logps = ref_per_seq_logps
 
@@ -1131,6 +1211,7 @@ class SOGRPOTrainer(GRPOTrainer):
             "mask_seeds": mask_seeds,  # Store all mask seeds for consistent mask patterns
             "reward_mask": reward_mask,
             "generation_mask": generation_mask, # Lolo1222: add generation_mask to inputs
+            "early_rollout_token_index": early_rollout_token_index, # Lolo1222: add early_rollout_token_index to inputs
         }
 
     

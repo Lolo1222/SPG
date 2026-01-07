@@ -83,11 +83,22 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 # Save dir: under repo save_dir, create a per-run folder spg_eubo_<timestamp>
 SAVE_DIR_BASE="${REPO_ROOT}/save_dir"
-SAVE_DIR="${SAVE_DIR_BASE}/spg_so_elbo_${TIMESTAMP}"
+SAVE_DIR="${SAVE_DIR_BASE}/spg_so_early_elbo_${TIMESTAMP}"
+# If RESUME_DIR is set, use it as SAVE_DIR (resume run) and ensure it exists
+if [ -n "${RESUME_DIR:-}" ]; then
+  if [ -d "${RESUME_DIR}" ]; then
+    echo "RESUME_DIR set, resuming from: ${RESUME_DIR}"
+    SAVE_DIR="${RESUME_DIR}"
+  else
+    echo "ERROR: RESUME_DIR=${RESUME_DIR} does not exist" >&2
+    exit 1
+  fi
+fi
 mkdir -p "$SAVE_DIR"
-
+# Export CHECKPOINT_DIR so the training script will search this directory for checkpoints
+export CHECKPOINT_DIR="$SAVE_DIR"
 DATASET="math"
-RUN_NAME=${DATASET}_base_spg_so_elbo_beta1.5
+RUN_NAME=${DATASET}_base_spg_so_early_elbo_beta1.5
 # Use a shared model path under repo save_dir/hf_models (not inside per-run folder)
 MODEL_PATH="${REPO_ROOT}/save_dir/hf_models/LLaDA-8B-Instruct"
 # Allow overriding for quick smoke-tests
@@ -165,6 +176,8 @@ ACCEL_CMD=("${ACCEL_BASE[@]}"
   --semi_offline_flag True
   --semi_offline_data_path /home/jwliu/dlm/SPG/dataset/math500_train.jsonl
   --semi_offline_ratio 0.85
+  --early_stop_rollout_flag True
+  --early_stop_threshold 0.85
   --eubo_beta 1.5)
 
 echo

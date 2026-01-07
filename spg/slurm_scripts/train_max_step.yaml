@@ -56,7 +56,7 @@ output_dir: /checkpoints/gsm_sft_bs12  # <-- Replace with desired output directo
 save_steps: 100
 save_strategy: steps
 # Lolo2222: change save_total_limit from 500 to 10
-save_total_limit: 10 
+save_total_limit: 5 
 
 # Diffusion and GRPO-specific
 max_completion_length: 256
