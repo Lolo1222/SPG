@@ -472,4 +472,6 @@ if __name__ == "__main__":
     # aggregate_results(directory="save_dir/eval_results/mix_eval_results_math_llada_spg_mix_20251214_120515")
     # aggregate_results(directory="save_dir/eval_results/mix_eval_results_math_llada_spg_mix_20251214_224212")
     # aggregate_results(directory="save_dir/eval_results/mix_eval_results_math_llada_spg_mix_20251221_205521")
-    aggregate_results(directory="/home/jwliu/dlm/SPG/save_dir/eval_results/elbo_eval_results_math_llada_spg_elbo_20251224_200822")
+    # aggregate_results(directory="/home/jwliu/dlm/SPG/save_dir/eval_results/elbo_eval_results_math_llada_spg_elbo_20251224_200822")
+    # aggregate_results(directory="save_dir/eval_results/eubo_eval_results_math_llada_spg_so_elbo_20260105_145030")
+    aggregate_results(directory="save_dir/eval_results/mix_eval_results_math_llada_spg_mix_20251221_205521")
