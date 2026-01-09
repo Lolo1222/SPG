@@ -185,7 +185,7 @@ class SOGRPOTrainer(GRPOTrainer):
             if early_stop_rollout_flag:
                 early_stop_token_num = int(early_stop_threshold * gen_length)
             total_gen_token_counts = [0 for i in range(bs)]
-            masked_generation_notmask_token_counts = [sum((masked_generation[bi]!=mask_id).int()).item() for bi in range(bs)]
+            masked_generation_notmask_token_counts = [((masked_generation[bi] != mask_id).int().sum()).item() for bi in range(bs)]
             # Lolo1222: for early stop rollout
             early_stop_flag = [False for i in range(bs)]
 
@@ -659,7 +659,7 @@ class SOGRPOTrainer(GRPOTrainer):
 
     def _get_per_seq_logps_for_semi_offline(self, model, input_ids, logits_to_keep, mask_seeds, generation_mask=None, early_rollout_token_index=None, prompt_mask=None, completion_mask=None, reward_mask=None):
         """
-        TODO(Lolo1222):
+        DONE(Lolo1222):
         Calculate per-token log probabilities for semi-offline generation.
         """
         # generation_mask = input_ids["generation_mask"]
@@ -714,8 +714,11 @@ class SOGRPOTrainer(GRPOTrainer):
         completion_targets = completion_targets.unsqueeze(1).repeat(1, self.args.num_t, 1)
         flat_logits = completion_logits.reshape(-1, completion_logits.size(-1))
         flat_targets = completion_targets.reshape(-1)
+        flat_target_ignored = flat_targets.clone()
+        if generation_mask is not None:
+            flat_target_ignored[-logits_to_keep:] = flat_target_ignored[-logits_to_keep:].masked_fill(~generation_mask[0],-100)
         
-        loss = F.cross_entropy(flat_logits, flat_targets, reduction="none")
+        loss = F.cross_entropy(flat_logits, flat_target_ignored, reduction="none", ignore_index=-100)
         prob = F.softmax(flat_logits, dim=-1).gather(dim=-1, index=flat_targets.unsqueeze(-1))
         
         # Convert to log probabilities and reshape
