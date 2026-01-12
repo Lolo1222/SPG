@@ -168,15 +168,9 @@ ACCEL_CMD=("${ACCEL_BASE[@]}"
   --output_dir "${SAVE_DIR}"
   --trainer diffu_grpo
   --forward_type block_random
-  --num_t 2
-  --min_t 0
-  --max_t 1
   --num_generations 6
   --per_device_train_batch_size ${PER_DEVICE_TRAIN_BATCH_SIZE}
-  --gradient_accumulation_steps ${GRADIENT_ACCUMULATION_STEPS}
-  --beta 0.0
-  --logp_estimation eubo
-  --eubo_beta 1.5)
+  --gradient_accumulation_steps ${GRADIENT_ACCUMULATION_STEPS})
 
 echo
 echo "Final command to run:"

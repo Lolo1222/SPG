@@ -24,7 +24,7 @@ which torchrun || echo "torchrun not found in PATH"
 
 # Configuration variables
 # GPU_IDS will be automatically set by SLURM, but we'll use all available GPUs
-GPU_IDS=(7)
+GPU_IDS=(0 2)
 
 # Generate a random port number between 10000 and 65535
 MASTER_PORT=$((RANDOM % 55536 + 10000))
@@ -68,8 +68,12 @@ for task in "${TASKS[@]}"; do
       --dataset $task \
       --batch_size $batch_size \
       --gen_length $gen_length \
-      --output_dir "${SAVE_DIR}/eval_results/eubo_eval_results_${task}_llada_spg_so_elbo_20260105_145030" \
-      --model_path "/home/jwliu/dlm/SPG/save_dir/spg_so_elbo_20260105_145030/checkpoint-4000"
+      --output_dir "${SAVE_DIR}/eval_results/mix_eval_results_${task}_llada_spg_mix_num_t3_20260111_004148" \
+      --model_path "/home/jwliu/dlm/SPG/save_dir/spg_mix_num_t3_20260111_004148/checkpoint-4000"
+      # --model_path "/home/jwliu/dlm/SPG/save_dir/spg_generated_so_elbo_20260110_104621/checkpoint-4000"
+      # --model_path "/home/jwliu/dlm/SPG/save_dir/spg_generated_so_elbo_20260109_143814/checkpoint-4000"
+      # --model_path "/home/jwliu/dlm/SPG/save_dir/spg_so_early_elbo_20260105_195010/checkpoint-4000"
+      # --model_path "/home/jwliu/dlm/SPG/save_dir/spg_so_elbo_20260105_145030/checkpoint-4000"
       # --model_path "/home/jwliu/dlm/SPG/save_dir/spg_so_elbo_20260105_145144/checkpoint-4000"
       # --model_path "/home/jwliu/dlm/SPG/save_dir/spg_eubo_20251226_072542/checkpoint-4000"
       # --model_path "/home/jwliu/dlm/SPG/save_dir/spg_elbo_20251224_200822/checkpoint-4000"

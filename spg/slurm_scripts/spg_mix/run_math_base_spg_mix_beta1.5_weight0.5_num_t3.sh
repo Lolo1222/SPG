@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Simple runner equivalent to the sbatch script math_base_spg_eubo_beta1.5.sbatch
+# Simple runner equivalent to the sbatch script math_base_spg_mix_beta1.5.sbatch
 # - Removes SLURM/srun and writes logs to a timestamped file under ../../logs
 # - Attempts to activate conda env `spg` (works with modern `conda activate` and older `source activate`)
 # - Generates a random main_process_port like the original
 
-# Resolve repository root (script is in spg/slurm_scripts/spg_eubo)
+# Resolve repository root (script is in spg/slurm_scripts/spg_mix)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
@@ -17,7 +17,7 @@ echo "LOGDIR=$LOGDIR"
 echo "REPO_ROOT=$REPO_ROOT"
 
 # User-configurable: set GPU_IDS here (e.g. "0" or "0,1") or export GPU_IDS in the environment
-# Example: GPU_IDS=0 ./run_math_base_spg_eubo_beta1.5.sh
+# Example: GPU_IDS=0 ./run_math_base_spg_mix_beta1.5.sh
 GPU_IDS="${GPU_IDS:-}"
 # Which conda env to use (default: spg). Can override with CONDA_ENV=myenv
 CONDA_ENV="${CONDA_ENV:-spg}"
@@ -81,9 +81,9 @@ echo "Using random main_process_port: $RANDOM_PORT"
 # timestamp to use for SAVE_DIR and logs
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
-# Save dir: under repo save_dir, create a per-run folder spg_eubo_<timestamp>
+# Save dir: under repo save_dir, create a per-run folder spg_mix_<timestamp>
 SAVE_DIR_BASE="${REPO_ROOT}/save_dir"
-SAVE_DIR="${SAVE_DIR_BASE}/spg_so_eubo_mix_${TIMESTAMP}"
+SAVE_DIR="${SAVE_DIR_BASE}/spg_mix_num_t3_${TIMESTAMP}"
 # If RESUME_DIR is set, use it as SAVE_DIR (resume run) and ensure it exists
 if [ -n "${RESUME_DIR:-}" ]; then
   if [ -d "${RESUME_DIR}" ]; then
@@ -94,10 +94,14 @@ if [ -n "${RESUME_DIR:-}" ]; then
     exit 1
   fi
 fi
+
 mkdir -p "$SAVE_DIR"
 
+# Export CHECKPOINT_DIR so the training script will search this directory for checkpoints
+export CHECKPOINT_DIR="$SAVE_DIR"
+
 DATASET="math"
-RUN_NAME=${DATASET}_base_spg_so_eubo_mix_beta1.5
+RUN_NAME=${DATASET}_base_spg_mix_num_t3_beta1.5
 # Use a shared model path under repo save_dir/hf_models (not inside per-run folder)
 MODEL_PATH="${REPO_ROOT}/save_dir/hf_models/LLaDA-8B-Instruct"
 # Allow overriding for quick smoke-tests
@@ -106,7 +110,7 @@ PER_DEVICE_TRAIN_BATCH_SIZE="${PER_DEVICE_TRAIN_BATCH_SIZE:-6}"
 GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-2}"
 
 # timestamped logfile (use same timestamp as SAVE_DIR)
-LOGFILE="${LOGDIR}/spg_eubo_mix_${TIMESTAMP}.out"
+LOGFILE="${LOGDIR}/spg_mix_num_t3_${TIMESTAMP}.out"
 echo "Logging to $LOGFILE"
 
 # Run accelerate directly (no srun / SLURM). Adjust --config_file and script path if needed.
@@ -162,9 +166,9 @@ ACCEL_CMD=("${ACCEL_BASE[@]}"
   --dataset "$DATASET"
   --run_name "$RUN_NAME"
   --output_dir "${SAVE_DIR}"
-  --trainer so
+  --trainer spg
   --forward_type block_random
-  --num_t 2
+  --num_t 3
   --min_t 0
   --max_t 1
   --num_generations 6
@@ -173,9 +177,6 @@ ACCEL_CMD=("${ACCEL_BASE[@]}"
   --beta 0.0
   --logp_estimation mix
   --mix_weight 0.5
-  --semi_offline_flag True
-  --semi_offline_data_path /home/jwliu/dlm/SPG/dataset/math500_train.jsonl
-  --semi_offline_ratio 0.85
   --eubo_beta 1.5)
 
 echo

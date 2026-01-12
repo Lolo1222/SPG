@@ -107,14 +107,14 @@ def evaluate(
         wall_times.append(time.time() - start_time)
 
         # Print individual results
-        if dist.get_rank() == 0:
-            idx = random.randint(0, len(questions) - 1)
-            print(f"Question: {questions[idx]}")
-            print("-" * 50)
-            print("Generation:")
-            print(generated_texts[idx])
-            print("-" * 50)
-            print(f"Ground truth: {gt_answers[idx]}")
+        # if dist.get_rank() == 0:
+        #     idx = random.randint(0, len(questions) - 1)
+        #     print(f"Question: {questions[idx]}")
+        #     print("-" * 50)
+        #     print("Generation:")
+        #     print(generated_texts[idx])
+        #     print("-" * 50)
+        #     print(f"Ground truth: {gt_answers[idx]}")
 
     avg_wall_time = sum(wall_times) / len(wall_times)
     metrics = {

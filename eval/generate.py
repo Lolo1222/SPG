@@ -75,7 +75,8 @@ def generate(
         assert gen_length % block_length == 0
         num_blocks = gen_length // block_length
         steps_per_block = max(1, steps // num_blocks)
-        for num_block in tqdm(range(num_blocks), disable=(dist.get_rank() != 0)):
+        # for num_block in tqdm(range(num_blocks), disable=(dist.get_rank() != 0)):
+        for num_block in range(num_blocks):
             start_idx = prompt.shape[1] + num_block * block_length
             end_idx = prompt.shape[1] + (num_block + 1) * block_length
 

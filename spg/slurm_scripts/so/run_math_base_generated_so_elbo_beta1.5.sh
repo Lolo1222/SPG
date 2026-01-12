@@ -83,21 +83,11 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 # Save dir: under repo save_dir, create a per-run folder spg_eubo_<timestamp>
 SAVE_DIR_BASE="${REPO_ROOT}/save_dir"
-SAVE_DIR="${SAVE_DIR_BASE}/spg_so_eubo_mix_${TIMESTAMP}"
-# If RESUME_DIR is set, use it as SAVE_DIR (resume run) and ensure it exists
-if [ -n "${RESUME_DIR:-}" ]; then
-  if [ -d "${RESUME_DIR}" ]; then
-    echo "RESUME_DIR set, resuming from: ${RESUME_DIR}"
-    SAVE_DIR="${RESUME_DIR}"
-  else
-    echo "ERROR: RESUME_DIR=${RESUME_DIR} does not exist" >&2
-    exit 1
-  fi
-fi
+SAVE_DIR="${SAVE_DIR_BASE}/spg_generated_so_elbo_${TIMESTAMP}"
 mkdir -p "$SAVE_DIR"
 
 DATASET="math"
-RUN_NAME=${DATASET}_base_spg_so_eubo_mix_beta1.5
+RUN_NAME=${DATASET}_base_spg_generated_so_elbo_beta1.5
 # Use a shared model path under repo save_dir/hf_models (not inside per-run folder)
 MODEL_PATH="${REPO_ROOT}/save_dir/hf_models/LLaDA-8B-Instruct"
 # Allow overriding for quick smoke-tests
@@ -106,7 +96,7 @@ PER_DEVICE_TRAIN_BATCH_SIZE="${PER_DEVICE_TRAIN_BATCH_SIZE:-6}"
 GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-2}"
 
 # timestamped logfile (use same timestamp as SAVE_DIR)
-LOGFILE="${LOGDIR}/spg_eubo_mix_${TIMESTAMP}.out"
+LOGFILE="${LOGDIR}/spg_elbo_generated_so_${TIMESTAMP}.out"
 echo "Logging to $LOGFILE"
 
 # Run accelerate directly (no srun / SLURM). Adjust --config_file and script path if needed.
@@ -171,10 +161,9 @@ ACCEL_CMD=("${ACCEL_BASE[@]}"
   --per_device_train_batch_size ${PER_DEVICE_TRAIN_BATCH_SIZE}
   --gradient_accumulation_steps ${GRADIENT_ACCUMULATION_STEPS}
   --beta 0.0
-  --logp_estimation mix
-  --mix_weight 0.5
+  --logp_estimation elbo
   --semi_offline_flag True
-  --semi_offline_data_path /home/jwliu/dlm/SPG/dataset/math500_train.jsonl
+  --semi_offline_data_path /home/jwliu/dlm/SPG/dataset/llada_math_generations_7500_converted.jsonl
   --semi_offline_ratio 0.85
   --eubo_beta 1.5)
 

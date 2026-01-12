@@ -185,7 +185,7 @@ class SOGRPOTrainer(GRPOTrainer):
             if early_stop_rollout_flag:
                 early_stop_token_num = int(early_stop_threshold * gen_length)
             total_gen_token_counts = [0 for i in range(bs)]
-            masked_generation_notmask_token_counts = [((masked_generation[bi] != mask_id).int().sum()).item() for bi in range(bs)]
+            masked_generation_notmask_token_counts = (masked_generation != mask_id).int().sum(dim=1).tolist()
             # Lolo1222: for early stop rollout
             early_stop_flag = [False for i in range(bs)]
 
@@ -504,8 +504,6 @@ class SOGRPOTrainer(GRPOTrainer):
             else:
                 is_mask = is_mask | ~completion_mask_append # mask all tokens after the first EOS token
             if generation_mask is not None:
-                # XXX(Lolo1222): need to check! shape?
-                # generation_mask = (masked_generation_ids_get_mask_index == self.args.mask_id).to(torch.bool)     
                 generation_mask_append = torch.cat((torch.zeros(b, num_t, prompt_index.sum(), dtype=torch.bool, device=batch.device), generation_mask.unsqueeze(1).repeat(1, num_t, 1)), dim=2).to(torch.bool)
                 is_mask = is_mask & generation_mask_append                
             if early_rollout_token_index is not None:
@@ -714,11 +712,7 @@ class SOGRPOTrainer(GRPOTrainer):
         completion_targets = completion_targets.unsqueeze(1).repeat(1, self.args.num_t, 1)
         flat_logits = completion_logits.reshape(-1, completion_logits.size(-1))
         flat_targets = completion_targets.reshape(-1)
-        flat_target_ignored = flat_targets.clone()
-        if generation_mask is not None:
-            flat_target_ignored[-logits_to_keep:] = flat_target_ignored[-logits_to_keep:].masked_fill(~generation_mask[0],-100)
-        
-        loss = F.cross_entropy(flat_logits, flat_target_ignored, reduction="none", ignore_index=-100)
+        loss = F.cross_entropy(flat_logits, flat_targets, reduction="none")
         prob = F.softmax(flat_logits, dim=-1).gather(dim=-1, index=flat_targets.unsqueeze(-1))
         
         # Convert to log probabilities and reshape
@@ -1122,6 +1116,7 @@ class SOGRPOTrainer(GRPOTrainer):
 
 
         # Lolo1222: asume num_iterations == batch_size
+        # 0112 updated: something wrong maybe(((
         # XXX(Lolo1222): build generation_mask in gpu temperately
         # Build generation_mask: 1 where token != mask_id, else 0
         # Ensure masked_generation_ids matches gen_length (pad/truncate) and move to device

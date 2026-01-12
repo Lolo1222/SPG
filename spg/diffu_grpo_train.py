@@ -13,7 +13,7 @@ from peft import LoraConfig
 from maskd_data_utils import generate_masked_sequence
 from spg.diffu_grpo_trainer import DiffuGRPOTrainer
 from spg.spg_trainer import SPGTrainer
-from spg.so_trainer import SOTrainer
+from spg.elbo_grpo_time_trainer import ElboGRPOTrainer
 from spg.so_grpo_trainer import SOGRPOTrainer
 from spg.diffu_grpo_config import DiffuGRPOConfig
 from spg.reward_func import (
@@ -251,6 +251,14 @@ def main(grpo_config, model_config):
         )
     elif grpo_config.trainer == "so":
         trainer = SOGRPOTrainer(
+            args=grpo_config,
+            model=model,
+            peft_config=peft_config,
+            reward_funcs=reward_functions,
+            train_dataset=train_set,
+        )
+    elif grpo_config.trainer == "elbo":
+        trainer = ElboGRPOTrainer(
             args=grpo_config,
             model=model,
             peft_config=peft_config,
