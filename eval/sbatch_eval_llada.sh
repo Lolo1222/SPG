@@ -14,7 +14,7 @@
 # Initialize conda (adjust path if your conda is installed elsewhere)
 # source /home/jwliu/miniconda3/etc/profile.d/conda.sh
 # conda activate spg
-cd /home/jwliu/dlm/SPG/eval
+cd /root/jiawei/SPG/eval
 
 # Print environment info for debugging
 echo "Python version: $(python --version)"
@@ -24,7 +24,7 @@ which torchrun || echo "torchrun not found in PATH"
 
 # Configuration variables
 # GPU_IDS will be automatically set by SLURM, but we'll use all available GPUs
-GPU_IDS=(0 2)
+GPU_IDS=(3 4 5 6)
 
 # Generate a random port number between 10000 and 65535
 MASTER_PORT=$((RANDOM % 55536 + 10000))
@@ -32,10 +32,10 @@ echo "Using random main_process_port: $MASTER_PORT"
 
 # Arrays of tasks and generation lengths
 TASKS=("math")
-# TASKS=("gsm8k" "math" "countdown")
-# GEN_LENGTHS=(512)
+# TASKS=("gsm8k" "math" "countdown" "sudoku")
+# GEN_LENGTHS=(256)
 GEN_LENGTHS=(128 256 512)
-SAVE_DIR=/home/jwliu/dlm/SPG/save_dir
+SAVE_DIR=/root/jiawei/SPG/save_dir
 
 # Use SLURM allocated GPUs
 if [ -n "$CUDA_VISIBLE_DEVICES" ]; then
@@ -68,20 +68,9 @@ for task in "${TASKS[@]}"; do
       --dataset $task \
       --batch_size $batch_size \
       --gen_length $gen_length \
-      --output_dir "${SAVE_DIR}/eval_results/mix_eval_results_${task}_llada_spg_mix_num_t3_20260111_004148" \
-      --model_path "/home/jwliu/dlm/SPG/save_dir/spg_mix_num_t3_20260111_004148/checkpoint-4000"
-      # --model_path "/home/jwliu/dlm/SPG/save_dir/spg_generated_so_elbo_20260110_104621/checkpoint-4000"
-      # --model_path "/home/jwliu/dlm/SPG/save_dir/spg_generated_so_elbo_20260109_143814/checkpoint-4000"
-      # --model_path "/home/jwliu/dlm/SPG/save_dir/spg_so_early_elbo_20260105_195010/checkpoint-4000"
-      # --model_path "/home/jwliu/dlm/SPG/save_dir/spg_so_elbo_20260105_145030/checkpoint-4000"
-      # --model_path "/home/jwliu/dlm/SPG/save_dir/spg_so_elbo_20260105_145144/checkpoint-4000"
-      # --model_path "/home/jwliu/dlm/SPG/save_dir/spg_eubo_20251226_072542/checkpoint-4000"
-      # --model_path "/home/jwliu/dlm/SPG/save_dir/spg_elbo_20251224_200822/checkpoint-4000"
-      # --model_path "/home/jwliu/dlm/SPG/save_dir/spg_mix_20251221_205521/checkpoint-4000"
-      # --model_path "/home/jwliu/dlm/SPG/save_dir/spg_mix_20251214_120515/checkpoint-4000"
-      # --model_path "/home/jwliu/dlm/SPG/save_dir/spg_mix_20251214_224212/checkpoint-4000"
-      # --model_path "/home/jwliu/dlm/SPG/save_dir/spg_eubo_20251212_175807/checkpoint-4000"
-      # --model_path "/home/jwliu/dlm/SPG/save_dir/spg_eubo_20251127_215615/checkpoint-4000"
+      --output_dir "${SAVE_DIR}/eval_results/math_swift_grpo_generated_num_t3_semi0.9_mask_answer_low_confidence_early0.9_20260126_230311" \
+      --model_path "/root/jiawei/SPG/save_dir/run_results/math_swift_grpo_generated_num_t3_semi0.9_mask_answer_low_confidence_early0.9_20260126_230311/checkpoint-4000"
+
       # --model_path "${SAVE_DIR}/hf_models/LLaDA-8B-Instruct/"
     # CUDA_VISIBLE_DEVICES=$GPU_LIST torchrun \
     #   --nproc_per_node $NUM_GPUS \

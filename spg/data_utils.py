@@ -82,6 +82,47 @@ def get_gsm8k_questions(split="train") -> Dataset:
         }
     )
 
+def get_gsm8k_questions_from_local(local_data_path: str) -> Dataset:
+    data = load_local_dataset_as_hf(local_data_path)
+    return data.map(
+        lambda x: {
+            "prompt": [
+                {"role": "user", "content": SYSTEM_PROMPT + "\n\n" + x["problem"]},
+            ],
+            "answer": extract_hash_answer(x["solution"]),
+            "generation": x["generation"],
+        }
+    )
+
+def get_gsm8k_questions(split="train") -> Dataset:
+    data = load_dataset("openai/gsm8k", "main")[split]
+    return data.map(
+        lambda x: {
+            "prompt": [
+                {"role": "user", "content": SYSTEM_PROMPT + "\n\n" + x["question"]},
+            ],
+            "answer": extract_hash_answer(x["answer"]),
+        }
+    )
+
+
+def get_countdown_questions_from_local(local_data_path: str) -> Dataset:
+    data = load_local_dataset_as_hf(local_data_path)
+    data = data.filter(lambda x: len(x["nums"]) == 3)
+
+    return data.map(
+        lambda x: {
+            "prompt": [
+                {
+                    "role": "user",
+                    "content": f"{SYSTEM_PROMPT}\nUsing only the numbers {x['nums']}, create an arithmetic expression that evaluates to exactly {x['target']}. You must use all numbers from the list, and each number must be used exactly once. You may use the operations +, -, *, and / as needed. After reasoning, provide only your final expression inside <answer></answer> tags without including an equals sign or the target number. For example, if the numbers are [2, 3, 4] and the target is 5, a valid answer is: <answer>\n2*4-3\n</answer>",
+                },
+            ],
+            "target": x["target"],
+            "numbers": x["nums"],
+            "generation": x["generation"],
+        }
+    )
 
 def get_countdown_questions(split="train") -> Dataset:
     data = load_dataset("Jiayi-Pan/Countdown-Tasks-3to4", split=split)
@@ -148,6 +189,34 @@ def get_sudoku_questions_new(few_shot=0) -> Dataset:
         }
     )
 
+def get_sudoku_questions_new_from_local(local_data_path: str, few_shot=0) -> Dataset:
+    """Load the Sudoku dataset for training or evaluation."""
+    # cur_path = os.path.dirname(os.path.abspath(__file__))
+    # sudoku_file_path = "../dataset/train_sudoku_split_new.csv"
+    # sudoku_file_path = os.path.join(cur_path, sudoku_file_path)
+    # df = pd.read_csv(sudoku_file_path, dtype={"Puzzle": str, "Solution": str})
+    # data = Dataset.from_pandas(df)
+    data = load_local_dataset_as_hf_for_sudoku(local_data_path)
+    assert few_shot <= 3, "few_shot must be less than or equal to 3"
+    few_shot_examples = [short_example_1, short_example_2, short_example_3][:few_shot]
+    few_shot_prompt = "\n\n".join(few_shot_examples)
+    system_prompt = f"{SUDOKU_SYSTEM_PROMPT}\n\n{few_shot_prompt}"
+
+    return data.map(
+        lambda x: {
+            "prompt": [
+                {
+                    "role": "user",
+                    # "content": f"{SUDOKU_SYSTEM_PROMPT}\n\nSolve the following Sudoku puzzle: {x['Puzzle']}\n",
+                    "content": f"{system_prompt}\n\nQuestion: Solve the following Sudoku puzzle: {str(x['Puzzle'])}\nAnswer:\n",
+                },
+            ],
+            "puzzle": str(x["Puzzle"]),
+            "solution": str(x["Solution"]),
+            "generation": x["generation"],
+        }
+    )
+
 def get_math_questions(split="train") -> Dataset:
     data = load_dataset("ankner/math-500", split=split)  # type: ignore
     data = data.map(
@@ -171,6 +240,21 @@ def load_local_dataset_as_hf(path: str) -> Dataset:
     """
     if path.endswith(".jsonl") or path.endswith(".json"):
         df = pd.read_json(path, lines=True)
+    elif path.endswith(".csv"):
+        df = pd.read_csv(path, dtype=str)
+    else:
+        raise ValueError(
+            "Unsupported file format for local dataset. Supported: .jsonl, .json, .csv"
+        )
+    return Dataset.from_pandas(df)
+
+def load_local_dataset_as_hf_for_sudoku(path: str) -> Dataset:
+    """Load a local JSONL/JSON/CSV file and return a HuggingFace Dataset.
+
+    Supported formats: .jsonl, .json (newline-delimited JSON), .csv.
+    """
+    if path.endswith(".jsonl") or path.endswith(".json"):
+        df = pd.read_json(path, lines=True, dtype={'Puzzle': str, 'Solution': str})
     elif path.endswith(".csv"):
         df = pd.read_csv(path, dtype=str)
     else:

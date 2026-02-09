@@ -68,7 +68,7 @@ remasking: low_confidence
 random_masking: True
 p_mask_prompt: 0.15
 beta: 0.04
-epsilon: 0.5
+epsilon: 0.2
 num_iterations: 12
 
 trainer: diffu_grpo

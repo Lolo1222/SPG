@@ -14,7 +14,7 @@ echo "REPO_ROOT=$REPO_ROOT"
 # Example: GPU_IDS=0 ./run_math_base_spg_mix_beta1.5.sh
 GPU_IDS="${GPU_IDS:-}"
 # Which conda env to use (default: spg). Can override with CONDA_ENV=myenv
-CONDA_ENV="${CONDA_ENV:-spg}"
+CONDA_ENV="${CONDA_ENV:-semi}"
 # Dry-run mode: set DRY_RUN=1 to only print the command without executing
 DRY_RUN="${DRY_RUN:-0}"
 if [ -n "$GPU_IDS" ]; then
@@ -77,7 +77,7 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 # Save dir: under repo save_dir, create a per-run folder spg_mix_<timestamp>
 SAVE_DIR_BASE="${REPO_ROOT}/save_dir"
-SAVE_DIR="${SAVE_DIR_BASE}/elbo_test_num_t3_${TIMESTAMP}"
+SAVE_DIR="${SAVE_DIR_BASE}/run_results/elbo_test_num_t3_${TIMESTAMP}"
 # If RESUME_DIR is set, use it as SAVE_DIR (resume run) and ensure it exists
 if [ -n "${RESUME_DIR:-}" ]; then
   if [ -d "${RESUME_DIR}" ]; then
@@ -98,7 +98,7 @@ DATASET="math"
 RUN_NAME=${DATASET}_base_elbo_num_t3
 # Use a shared model path under repo save_dir/hf_models (not inside per-run folder)
 # MODEL_PATH="${REPO_ROOT}/save_dir/hf_models/LLaDA-8B-Instruct"
-MODEL_PATH="${REPO_ROOT}/save_dir/hf_models/LLaDA-1.5"
+MODEL_PATH="/root/Models/LLaDA-8B-Instruct"
 # Allow overriding for quick smoke-tests
 NUM_ITER="${NUM_ITER:-4}"
 PER_DEVICE_TRAIN_BATCH_SIZE="${PER_DEVICE_TRAIN_BATCH_SIZE:-6}"

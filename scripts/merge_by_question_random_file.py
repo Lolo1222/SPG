@@ -7,12 +7,13 @@ from glob import glob
 
 # Config
 input_paths = []
-input_paths += glob("deal_data/llada_math_generations_all_sorted.jsonl")
-input_paths += glob("deal_data/llada_math_generations_rank*.jsonl")
+# input_paths += glob("deal_data/llada_math_generations_all_sorted.jsonl")
+input_paths += glob("dataset/sudoku/llada_math_generations_rank0.jsonl")
+input_paths += glob("dataset/sudoku/llada_math_generations_rank1.jsonl")
 # input_paths += glob("deal_data/math01/llada_math_generations.jsonl")
 # input_paths += glob("deal_data/math02/llada_math_generations_rank*.jsonl")
-output_jsonl = "deal_data/math_merged.jsonl"
-output_summary = "deal_data/math_merged_summary.json"
+output_jsonl = "dataset/sudoku/math_merged.jsonl"
+output_summary = "dataset/sudoku/math_merged_summary.json"
 seed = 42  # 若需可设置为整数以复现，例如 seed = 42
 
 def main():
@@ -40,21 +41,23 @@ def main():
                     for line in fh:
                         line = line.strip()
                         if not line:
+                            # print(f"警告：跳过 {fpath} 的空行。")
                             continue
+
                         try:
                             obj = json.loads(line)
                         except Exception as e:
                             # 跳过无法解析的行（但报告）
                             print(f"警告：无法解析 {fpath} 的一行：{e}")
                             continue
-                        q = obj.get("question")
-                        if q is None:
-                            # 如果没有 question 字段，跳过
-                            continue
-                        if q in seen:
-                            continue
-                        # First occurrence (because files order is randomized)
-                        seen.add(q)
+                        # q = obj.get("question")
+                        # if q is None:
+                        #     # 如果没有 question 字段，跳过
+                        #     continue
+                        # if q in seen:
+                        #     continue
+                        # # First occurrence (because files order is randomized)
+                        # seen.add(q)
                         out_f.write(json.dumps(obj, ensure_ascii=False) + "\n")
                         num_samples += 1
                         if obj.get("best_of_N_correct") is True:

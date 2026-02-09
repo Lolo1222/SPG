@@ -170,3 +170,9 @@ tmp/
 save_dir/
 deal_data/
 *.jsonl
+./wandb
+dataset/llada_countdown_generations_rank0
+*.parquet
+*.csv
+*.json
+*.jsonl

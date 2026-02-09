@@ -250,6 +250,154 @@ class DiffuGRPOTrainer(GRPOTrainer):
 
             return x
 
+    def generate_for_semi_offline(
+        self,
+        model,
+        prompt,
+        masked_generation,
+        early_stop_rollout_flag=False,
+        early_stop_threshold=0.85,
+        steps=128,
+        gen_length=128,
+        block_length=128,
+        temperature=0.0,
+        cfg_scale=0.0,
+        remasking="low_confidence",
+        mask_id=126336,
+    ):
+        """generation code adopted from llada (https://github.com/ML-GSAI/LLaDA)"""
+        if masked_generation.size(1) > gen_length:
+            print(f"WARNING: masked_generation length {masked_generation.size(1)} > gen_length {gen_length}, only generating first {gen_length} tokens.")
+            masked_generation = masked_generation[:, :gen_length]
+
+        with torch.cuda.amp.autocast(enabled=True):
+            bs = prompt.shape[0]
+            dtype = model.dtype
+            if early_stop_rollout_flag:
+                early_stop_token_num = int(early_stop_threshold * gen_length)
+            total_gen_token_counts = [0 for i in range(bs)]
+            masked_generation_notmask_token_counts = (masked_generation != mask_id).int().sum(dim=1).tolist()
+            # Lolo1222: for early stop rollout
+            early_stop_flag = [False for i in range(bs)]
+
+            x = torch.full((bs, prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
+            x[:, : prompt.shape[1]] = prompt.clone()
+
+            prompt_index = x != mask_id
+
+            assert gen_length % block_length == 0
+            num_blocks = gen_length // block_length
+
+            # Adjust steps if needed
+            steps_per_block = max(1, steps // num_blocks)
+
+            for num_block in range(num_blocks):
+                if early_stop_rollout_flag and all(early_stop_flag):
+                    break  
+                start_idx = prompt.shape[1] + num_block * block_length
+                end_idx = prompt.shape[1] + (num_block + 1) * block_length
+
+                block_mask_index = x[:, start_idx:end_idx] == mask_id
+                num_transfer_tokens = self.get_num_transfer_tokens(block_mask_index, steps_per_block)
+
+                for i in range(steps_per_block):
+                    torch.cuda.empty_cache()
+                    if early_stop_rollout_flag and all(early_stop_flag):
+                        break
+                    mask_index = x == mask_id
+
+                    if hasattr(torch.cuda, "amp") and hasattr(torch.cuda.amp, "autocast"):
+                        with torch.cuda.amp.autocast(enabled=self.args.fp16):
+                            # Handle classifier-free guidance more efficiently
+                            if cfg_scale > 0.0:
+                                un_x = x.clone()
+                                un_x[prompt_index] = mask_id
+                                x_ = torch.cat([x, un_x], dim=0)
+
+                                # Get logits in a single forward pass
+                                logits = model(x_).logits
+                                logits, un_logits = torch.chunk(logits, 2, dim=0)
+                                logits = un_logits + (cfg_scale + 1) * (logits - un_logits)
+                            else:
+                                logits = model(x).logits
+
+                            # Apply Gumbel noise for sampling
+                            logits_with_noise = self.add_gumbel_noise(
+                                logits, temperature=temperature, dtype=dtype
+                            )
+                            x0 = torch.argmax(logits_with_noise, dim=-1)
+                            del logits_with_noise
+
+                            # Handle remasking strategy
+                            if remasking == "low_confidence":
+                                p = F.softmax(logits.to(dtype), dim=-1)
+                                x0_p = torch.squeeze(
+                                    torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1
+                                )
+                            elif remasking == "random":
+                                x0_p = torch.rand((x0.shape[0], x0.shape[1]), device=x0.device)
+                            else:
+                                raise NotImplementedError(remasking)
+
+                            # Ensure we don't process tokens beyond the current block
+                            x0_p[:, end_idx:] = -np.inf
+
+                            # Update masked tokens
+                            x0 = torch.where(mask_index, x0, x)
+                            confidence = torch.where(mask_index, x0_p, -np.inf)
+
+                            # Select tokens to transfer based on confidence
+                            transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=x0.device)
+                            for j in range(confidence.shape[0]):
+                                if early_stop_rollout_flag and all(early_stop_flag):
+                                    break
+                                num_tokens = num_transfer_tokens[j, i].item()
+                                if early_stop_rollout_flag:
+                                    if total_gen_token_counts[j] + num_tokens + masked_generation_notmask_token_counts[j] > early_stop_token_num:
+                                        num_tokens = early_stop_token_num - total_gen_token_counts[j] - masked_generation_notmask_token_counts[j]
+                                        early_stop_flag[j] = True
+                                total_gen_token_counts[j] += num_tokens
+                                if num_tokens > 0:
+                                    _, select_index = torch.topk(confidence[j], k=num_tokens)
+                                    transfer_index[j, select_index] = True
+
+                            x[transfer_index] = x0[transfer_index]
+                            del x0, confidence, transfer_index
+            if early_stop_rollout_flag and all(early_stop_flag):
+                # print(f"Early stop rollout at total_gen_token_counts: {total_gen_token_counts}")
+                still_masked_index = x == mask_id
+                if hasattr(torch.cuda, "amp") and hasattr(torch.cuda.amp, "autocast"):
+                    with torch.cuda.amp.autocast(enabled=self.args.fp16):
+                        # Handle classifier-free guidance more efficiently
+                        if cfg_scale > 0.0:
+                            un_x = x.clone()
+                            un_x[prompt_index] = mask_id
+                            x_ = torch.cat([x, un_x], dim=0)
+
+                            # Get logits in a single forward pass
+                            logits = model(x_).logits
+                            logits, un_logits = torch.chunk(logits, 2, dim=0)
+                            logits = un_logits + (cfg_scale + 1) * (logits - un_logits)
+                        else:
+                            # XXX(Lolo1222): only non masked tokens have logits? NO!
+                            logits = model(x).logits
+
+                        # Apply Gumbel noise for sampling
+                        logits_with_noise = self.add_gumbel_noise(
+                            logits, temperature=temperature, dtype=dtype
+                        )
+                        x0 = torch.argmax(logits_with_noise, dim=-1)
+                        del logits_with_noise
+
+                        x = torch.where(still_masked_index, x0, x)
+
+                        del x0
+                        early_rollout_token_index = still_masked_index
+                        # early_rollout_token_index = still_masked_index[:, prompt.shape[1]:]
+            else:
+                early_rollout_token_index = None
+            return x, early_rollout_token_index
+
     def forward_process(self, batch, prompt_index, mask_id, seed=None, generation_mask=None, early_rollout_token_index=None):
         set_seed(seed)
         b, l = batch.shape
@@ -266,10 +414,10 @@ class DiffuGRPOTrainer(GRPOTrainer):
 
         if generation_mask is not None:
             # XXX(Lolo1222): need to check! shape?  
-            generation_mask_append = torch.cat((torch.zeros(b, prompt_index.sum(), dtype=torch.bool, device=batch.device), generation_mask.unsqueeze(1)), dim=2).to(torch.bool)
+            generation_mask_append = torch.cat((torch.zeros(b, prompt_index.sum(), dtype=torch.bool, device=batch.device), generation_mask), dim=1).to(torch.bool)
             is_mask = is_mask & generation_mask_append
-        if early_rollout_token_index is not None:
-            is_mask = is_mask & ~early_rollout_token_index
+        # if early_rollout_token_index is not None:
+        #     is_mask = is_mask & ~early_rollout_token_index
 
         # Create a noisy (masked) batch
         noisy_batch = torch.where(is_mask, mask_id, batch)
@@ -425,7 +573,7 @@ class DiffuGRPOTrainer(GRPOTrainer):
         ]  # [num_iterations * batch_size, logits_to_keep]
         flat_logits = completion_logits.reshape(-1, completion_logits.size(-1))
         flat_targets = completion_targets.reshape(-1)
-        loss = F.cross_entropy(flat_logits, flat_targets, reduction="none", ignore_index=~generation_mask)
+        loss = F.cross_entropy(flat_logits, flat_targets, reduction="none")
 
         # Convert to log probabilities and reshape
         completion_log_probs = -loss.view(num_iterations * batch_size, logits_to_keep)

@@ -120,7 +120,8 @@ def compute_score(solution_str, ground_truth, method="strict", format_score=0.1,
     numbers = ground_truth["numbers"]
 
     equation = extract_solution(solution_str)
-    do_print = np.random.rand() < 0.4
+    # do_print = np.random.rand() < 0.4
+    do_print = False
 
     if do_print:
         print(f"--------------------------------")
@@ -195,7 +196,6 @@ def validate_sudoku_solution(solution_str, ground_truth, puzzle):
     elif len(solution_str) > 16:
         # Truncate if too long
         solution_str = solution_str[:16]
-
     empty_indices = [i for i in range(16) if puzzle[i] == "0"]
 
     if empty_indices:
@@ -216,7 +216,8 @@ def sudoku_reward_func(prompts, completions, run_name, step=None, rank=None, **k
 
     scores = []
     for i, response in enumerate(responses):
-        do_print = np.random.rand() < 0.4
+        # do_print = np.random.rand() < 0.4
+        do_print = False
         puzzle = kwargs["puzzle"][i]
         ground_truth = kwargs["solution"][i]
         solution = extract_answer_sudoku(response)

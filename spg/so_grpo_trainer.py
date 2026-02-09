@@ -471,8 +471,8 @@ class SOGRPOTrainer(GRPOTrainer):
                 # generation_mask = (masked_generation_ids_get_mask_index == self.args.mask_id).to(torch.bool)     
                 generation_mask_append = torch.cat((torch.zeros(b, num_t, prompt_index.sum(), dtype=torch.bool, device=batch.device), generation_mask.unsqueeze(1).repeat(1, num_t, 1)), dim=2).to(torch.bool)
                 is_mask = is_mask & generation_mask_append
-            if early_rollout_token_index is not None:
-                is_mask = is_mask & ~early_rollout_token_index
+            # if early_rollout_token_index is not None:
+            #     is_mask = is_mask & ~early_rollout_token_index
                 
             # Create a noisy (masked) batch
             noisy_batch = torch.where(is_mask, mask_id, batch) # [b, l]
@@ -506,8 +506,8 @@ class SOGRPOTrainer(GRPOTrainer):
             if generation_mask is not None:
                 generation_mask_append = torch.cat((torch.zeros(b, num_t, prompt_index.sum(), dtype=torch.bool, device=batch.device), generation_mask.unsqueeze(1).repeat(1, num_t, 1)), dim=2).to(torch.bool)
                 is_mask = is_mask & generation_mask_append                
-            if early_rollout_token_index is not None:
-                is_mask = is_mask & ~early_rollout_token_index            
+            # if early_rollout_token_index is not None:
+            #     is_mask = is_mask & ~early_rollout_token_index.unsqueeze(1).repeat(1, num_t, 1)                         
             noisy_batch = torch.where(is_mask, mask_id, batch.unsqueeze(1).repeat(1, num_t, 1)) # [b, num_t, l]
             block_mask = torch.ones((b, num_t, l), dtype=torch.bool, device=batch.device)
         elif forward_type == "block_all":
@@ -543,8 +543,8 @@ class SOGRPOTrainer(GRPOTrainer):
                 generation_mask_append = torch.cat((torch.zeros(b, num_t, prompt_index.sum(), dtype=torch.bool, device=batch.device), generation_mask.unsqueeze(1).repeat(1, num_t, 1)), dim=2).to(torch.bool)
                 is_mask = is_mask & generation_mask_append                
             
-            if early_rollout_token_index is not None:
-                is_mask = is_mask & ~early_rollout_token_index            
+            # if early_rollout_token_index is not None:
+            #     is_mask = is_mask & ~early_rollout_token_index.unsqueeze(1).repeat(1, num_t, 1)         
             noisy_batch = torch.where(is_mask, mask_id, batch.unsqueeze(1).repeat(1, num_t, 1)) # [b, num_t, l]
         elif forward_type == "block_random":
             b, l = batch.shape
@@ -599,8 +599,8 @@ class SOGRPOTrainer(GRPOTrainer):
                 generation_mask_append = torch.cat((torch.zeros(b, num_t, prompt_index.sum(), dtype=torch.bool, device=batch.device), generation_mask.unsqueeze(1).repeat(1, num_t, 1)), dim=2).to(torch.bool)
                 is_mask = is_mask & generation_mask_append
 
-            if early_rollout_token_index is not None:
-                is_mask = is_mask & ~early_rollout_token_index.unsqueeze(1).repeat(1, num_t, 1)
+            # if early_rollout_token_index is not None:
+            #     is_mask = is_mask & ~early_rollout_token_index.unsqueeze(1).repeat(1, num_t, 1)
             noisy_batch = torch.where(is_mask, mask_id, batch.unsqueeze(1).repeat(1, num_t, 1)) # [b, num_t, l]
         return noisy_batch, block_mask
 
@@ -1115,7 +1115,7 @@ class SOGRPOTrainer(GRPOTrainer):
         reward_mask = (advantages[process_slice] > 0).bool()
 
 
-        # Lolo1222: asume num_iterations == batch_size
+        # Lolo1222: asume num_generations == batch_size
         # 0112 updated: something wrong maybe(((
         # XXX(Lolo1222): build generation_mask in gpu temperately
         # Build generation_mask: 1 where token != mask_id, else 0

@@ -20,7 +20,7 @@ echo "REPO_ROOT=$REPO_ROOT"
 # Example: GPU_IDS=0 ./run_math_base_spg_eubo_beta1.5.sh
 GPU_IDS="${GPU_IDS:-}"
 # Which conda env to use (default: spg). Can override with CONDA_ENV=myenv
-CONDA_ENV="${CONDA_ENV:-spg}"
+CONDA_ENV="${CONDA_ENV:-semi}"
 # Dry-run mode: set DRY_RUN=1 to only print the command without executing
 DRY_RUN="${DRY_RUN:-0}"
 if [ -n "$GPU_IDS" ]; then

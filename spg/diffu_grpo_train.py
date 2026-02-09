@@ -10,11 +10,18 @@ from trl import TrlParser, ModelConfig
 from peft import LoraConfig
 
 # Custom imports
-from maskd_data_utils import generate_masked_sequence
+from maskd_data_utils import generate_masked_sequence, generate_masked_sequence_for_countdown, generate_masked_sequence_for_sudoku_new
 from spg.diffu_grpo_trainer import DiffuGRPOTrainer
 from spg.spg_trainer import SPGTrainer
-from spg.elbo_grpo_time_trainer import ElboGRPOTrainer
+# from spg.elbo_grpo_trainer import ElboGRPOTrainer
+# from spg.swift_grpo_trainer import SWIFTTrainer
+from spg.swift_grpo_variance_trainer import SWIFTTrainer
+from spg.new_unigrpo_trainer import newUniGRPOTrainer
+# from spg.elbo_grpo_time_trainer import ElboGRPOTrainer
+from spg.elbo_grpo_variance_trainer import ElboGRPOTrainer
 from spg.so_grpo_trainer import SOGRPOTrainer
+from spg.elbo_rloo_trainer import ElboRLOOTrainer
+from spg.unigrpo_trainer import UniGRPOTrainer
 from spg.diffu_grpo_config import DiffuGRPOConfig
 from spg.reward_func import (
     xmlcount_reward_func,
@@ -36,7 +43,7 @@ from spg.data_utils import (
     set_random_seed,
     get_math_questions,
 )
-from spg.data_utils import get_math_questions_from_local
+from spg.data_utils import get_math_questions_from_local, get_gsm8k_questions_from_local, get_countdown_questions_from_local, get_sudoku_questions_new_from_local
 
 
 # ---------------- Checkpoint / resume utilities -----------------
@@ -149,17 +156,64 @@ def main(grpo_config, model_config):
 
     tokenizer = AutoTokenizer.from_pretrained(grpo_config.model_path, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
+
+    # Set up device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # 4 bit quantization configuration
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.bfloat16,
+    )
+
+    # Load model and tokenizer
+    model = AutoModel.from_pretrained(
+        grpo_config.model_path,
+        trust_remote_code=True,
+        torch_dtype=torch.bfloat16,
+        quantization_config=bnb_config,
+    ).to(device)
+
+    model.config.use_cache = False
+
     # Load dataset based on configuration
     # If semi-offline used, we will load dataset with generated sequences from local path
     # XXX(Lolo1222): currently only math dataset supports semi-offline mode
     if getattr(grpo_config, "semi_offline_flag", False):
         print(f"=== Using semi-offline dataset from {grpo_config.semi_offline_data_path} ===")
-        original_dataset = get_math_questions_from_local(grpo_config.semi_offline_data_path)
-        dataset = generate_masked_sequence(original_dataset, tokenizer, p_question_mask=0, p_gen_mask=grpo_config.semi_offline_ratio, seed=grpo_config.seed, gen_masking_strategy=grpo_config.semi_offline_strategy)
-        reward_functions = [
-            correctness_reward_func_math,
-            boxed_and_answer_tags_format_reward,
-        ]
+        if grpo_config.dataset == "gsm8k":
+            original_dataset = get_gsm8k_questions_from_local(grpo_config.semi_offline_data_path)
+            reward_functions = [
+                xmlcount_reward_func,
+                soft_format_reward_func,
+                strict_format_reward_func,
+                int_reward_func,
+                correctness_reward_func,
+            ]
+        elif grpo_config.dataset == "countdown":
+            original_dataset = get_countdown_questions_from_local(grpo_config.semi_offline_data_path)
+            reward_functions = [countdown_reward_func]
+        elif grpo_config.dataset == "sudoku_new":
+            original_dataset = get_sudoku_questions_new_from_local(grpo_config.semi_offline_data_path)
+            reward_functions = [sudoku_reward_func]
+        elif grpo_config.dataset == "math": 
+            original_dataset = get_math_questions_from_local(grpo_config.semi_offline_data_path)
+            reward_functions = [
+                correctness_reward_func_math,
+                boxed_and_answer_tags_format_reward,
+            ]            
+        else:
+            raise ValueError(f"Semi-offline dataset not supported for dataset: {grpo_config.dataset}")
+
+        if grpo_config.dataset == "countdown":
+            dataset = generate_masked_sequence_for_countdown(original_dataset, tokenizer, model=model, p_question_mask=0, p_gen_mask=grpo_config.semi_offline_ratio, seed=grpo_config.seed, gen_masking_strategy=grpo_config.semi_offline_strategy)
+        elif grpo_config.dataset == "sudoku_new":
+            dataset = generate_masked_sequence_for_sudoku_new(original_dataset, tokenizer, model=model, p_question_mask=0, p_gen_mask=grpo_config.semi_offline_ratio, seed=grpo_config.seed, gen_masking_strategy=grpo_config.semi_offline_strategy)
+        else:
+            dataset = generate_masked_sequence(original_dataset, tokenizer, model=model, p_question_mask=0, p_gen_mask=grpo_config.semi_offline_ratio, seed=grpo_config.seed, gen_masking_strategy=grpo_config.semi_offline_strategy)
+
 
         
     else:
@@ -203,26 +257,6 @@ def main(grpo_config, model_config):
     else:
         train_set = dataset
 
-    # Set up device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # 4 bit quantization configuration
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-    )
-
-    # Load model and tokenizer
-    model = AutoModel.from_pretrained(
-        grpo_config.model_path,
-        trust_remote_code=True,
-        torch_dtype=torch.bfloat16,
-        quantization_config=bnb_config,
-    ).to(device)
-
-    model.config.use_cache = False
 
     # Configure LoRA for parameter-efficient fine-tuning
     peft_config = LoraConfig(
@@ -265,6 +299,38 @@ def main(grpo_config, model_config):
             reward_funcs=reward_functions,
             train_dataset=train_set,
         )
+    elif grpo_config.trainer == "swift":
+        trainer = SWIFTTrainer(
+            args=grpo_config,
+            model=model,
+            peft_config=peft_config,
+            reward_funcs=reward_functions,
+            train_dataset=train_set,
+        )
+    elif grpo_config.trainer == "unigrpo":
+        trainer = UniGRPOTrainer(
+            args=grpo_config,
+            model=model,
+            peft_config=peft_config,
+            reward_funcs=reward_functions,
+            train_dataset=train_set,
+        )
+    elif grpo_config.trainer == "newunigrpo":
+        trainer = newUniGRPOTrainer(
+            args=grpo_config,
+            model=model,
+            peft_config=peft_config,
+            reward_funcs=reward_functions,
+            train_dataset=train_set,
+        )
+    elif grpo_config.trainer == "elbo_rloo":
+        trainer = ElboRLOOTrainer(
+            args=grpo_config,
+            model=model,
+            peft_config=peft_config,
+            reward_funcs=reward_functions,
+            train_dataset=train_set,
+        )
     else:
         raise ValueError(f"Invalid trainer: {grpo_config.trainer}")
 
@@ -280,8 +346,8 @@ def main(grpo_config, model_config):
     updates_per_epoch = (batches_per_epoch + grpo_config.gradient_accumulation_steps - 1) // grpo_config.gradient_accumulation_steps
     est_total_updates = updates_per_epoch * grpo_config.num_train_epochs
     print(f"batches_per_epoch: {batches_per_epoch}, updates_per_epoch: {updates_per_epoch}, est_total_updates: {est_total_updates}")
-
-    wandb.init(project="llada_diffu_grpo", config=grpo_config, name=grpo_config.run_name)
+    os.environ["WANDB_MODE"] = "offline"
+    wandb.init(project="a800_llada_for_semi", config=grpo_config, name=grpo_config.run_name)
     # Setup checkpoint directory and try to resume from latest checkpoint if present
     ckpt_dir = getattr(grpo_config, "output_dir", None) or os.environ.get("CHECKPOINT_DIR", "checkpoints_on_low_mem")
     os.makedirs(ckpt_dir, exist_ok=True)
