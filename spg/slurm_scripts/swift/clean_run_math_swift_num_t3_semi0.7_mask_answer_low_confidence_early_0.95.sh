@@ -12,7 +12,7 @@ echo "REPO_ROOT=$REPO_ROOT"
 ACCEL_CONFIG_FILE="${REPO_ROOT}/spg/slurm_scripts/accelerate_genai_a100.yaml"
 TRAIN_CONFIG_FILE="${REPO_ROOT}/spg/slurm_scripts/train_elbo.yaml"
 DATASET="math"
-RUN_NAME=${DATASET}_swift_grpo_generated_num_t3_semi0.95_mask_answer_low_confidence_early0.95
+RUN_NAME=${DATASET}_swift_grpo_generated_num_t3_semi0.7_mask_answer_low_confidence_early0.95
 TRAINER="swift"
 FORWARD_TYPE="random"
 SEMI_OFFLINE_STRATEGY="mask_answer_low_confidence"
@@ -130,7 +130,7 @@ ACCEL_CMD=("${ACCEL_BASE[@]}"
   --num_generations 6
   --semi_offline_flag True
   --semi_offline_data_path dataset/llada_math_generations_7500_converted.jsonl
-  --semi_offline_ratio 0.95
+  --semi_offline_ratio 0.7
   --early_stop_rollout_flag True
   --early_stop_threshold 0.95  
   --semi_offline_strategy ${SEMI_OFFLINE_STRATEGY}

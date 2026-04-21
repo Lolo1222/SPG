@@ -31,7 +31,7 @@ MASTER_PORT=$((RANDOM % 55536 + 10000))
 echo "Using random main_process_port: $MASTER_PORT"
 
 # Arrays of tasks and generation lengths
-TASKS=("countdown")
+TASKS=("math")
 # TASKS=("gsm8k" "math" "countdown" "sudoku")
 GEN_LENGTHS=(256)
 # GEN_LENGTHS=(128 256 512)
@@ -66,10 +66,12 @@ for task in "${TASKS[@]}"; do
       --master_port $MASTER_PORT \
       eval.py \
       --dataset $task \
+      --math500_subset val \
+      --math500_split_file dataset/math500_test_split_seed42.json \
       --batch_size $batch_size \
       --gen_length $gen_length \
-      --output_dir "${SAVE_DIR}/eval_results/countdown_spg_mix_num_t3_20260403_064750" \
-      --model_path "/home/jwliu/dlm/SPG/save_dir/run_results/countdown_spg_mix_num_t3_20260403_064750/checkpoint-4000"
+      --output_dir "${SAVE_DIR}/val_results/math_swift_grpo_generated_num_t3_semi0.8_mask_answer_low_confidence_early0.95_20260327_045612" \
+      --model_path "/home/jwliu/dlm/SPG/save_dir/run_results/math_swift_grpo_generated_num_t3_semi0.8_mask_answer_low_confidence_early0.95_20260327_045612/checkpoint-4000"
 
       # --model_path "${SAVE_DIR}/hf_models/LLaDA-8B-Instruct/"
     # CUDA_VISIBLE_DEVICES=$GPU_LIST torchrun \

@@ -13,15 +13,18 @@ from peft import LoraConfig
 from maskd_data_utils import generate_masked_sequence, generate_masked_sequence_for_countdown, generate_masked_sequence_for_sudoku_new
 from spg.diffu_grpo_trainer import DiffuGRPOTrainer
 from spg.spg_trainer import SPGTrainer
+from spg.token_spg_trainer import TokenSPGTrainer
 # from spg.elbo_grpo_trainer import ElboGRPOTrainer
-# from spg.swift_grpo_trainer import SWIFTTrainer
-from spg.swift_grpo_variance_trainer import SWIFTTrainer
+from spg.swift_grpo_trainer import SWIFTTrainer
+from spg.swift_grpo_seq_trainer import SWIFTSeqTrainer
+from spg.swift_grpo_seq_fast_trainer import SWIFTSeqFastTrainer
+# from spg.swift_grpo_variance_trainer import SWIFTTrainer
 from spg.new_unigrpo_trainer import newUniGRPOTrainer
 # from spg.elbo_grpo_time_trainer import ElboGRPOTrainer
 from spg.elbo_grpo_variance_trainer import ElboGRPOTrainer
 from spg.so_grpo_trainer import SOGRPOTrainer
 from spg.elbo_rloo_trainer import ElboRLOOTrainer
-from spg.unigrpo_trainer import UniGRPOTrainer
+from spg.newnew_unigrpo_trainer import UniGRPOTrainer
 from spg.diffu_grpo_config import DiffuGRPOConfig
 from spg.reward_func import (
     xmlcount_reward_func,
@@ -283,6 +286,14 @@ def main(grpo_config, model_config):
             reward_funcs=reward_functions,
             train_dataset=train_set,
         )
+    elif grpo_config.trainer == "token_spg":
+        trainer = TokenSPGTrainer(
+            args=grpo_config,
+            model=model,
+            peft_config=peft_config,
+            reward_funcs=reward_functions,
+            train_dataset=train_set,
+        )
     elif grpo_config.trainer == "so":
         trainer = SOGRPOTrainer(
             args=grpo_config,
@@ -301,6 +312,22 @@ def main(grpo_config, model_config):
         )
     elif grpo_config.trainer == "swift":
         trainer = SWIFTTrainer(
+            args=grpo_config,
+            model=model,
+            peft_config=peft_config,
+            reward_funcs=reward_functions,
+            train_dataset=train_set,
+        )
+    elif grpo_config.trainer == "swift_seq":
+        trainer = SWIFTSeqTrainer(
+            args=grpo_config,
+            model=model,
+            peft_config=peft_config,
+            reward_funcs=reward_functions,
+            train_dataset=train_set,
+        )
+    elif grpo_config.trainer == "swift_seq_fast":
+        trainer = SWIFTSeqFastTrainer(
             args=grpo_config,
             model=model,
             peft_config=peft_config,

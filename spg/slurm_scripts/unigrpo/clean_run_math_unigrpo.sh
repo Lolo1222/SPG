@@ -12,14 +12,14 @@ echo "REPO_ROOT=$REPO_ROOT"
 ACCEL_CONFIG_FILE="${REPO_ROOT}/spg/slurm_scripts/accelerate_genai_a100.yaml"
 TRAIN_CONFIG_FILE="${REPO_ROOT}/spg/slurm_scripts/train_elbo.yaml"
 DATASET="math"
-RUN_NAME=${DATASET}_unigrpo_num_t4
+RUN_NAME=${DATASET}_unigrpo_num
 TRAINER="unigrpo"
 FORWARD_TYPE="random"
 ############# FIX *****************
 
 GPU_IDS="${GPU_IDS:-}"
 
-CONDA_ENV="${CONDA_ENV:-semi}"
+CONDA_ENV="${CONDA_ENV:-spg}"
 # Dry-run mode: set DRY_RUN=1 to only print the command without executing
 DRY_RUN="${DRY_RUN:-0}"
 if [ -n "$GPU_IDS" ]; then
@@ -64,7 +64,7 @@ mkdir -p "$SAVE_DIR"
 export CHECKPOINT_DIR="$SAVE_DIR"
 
 
-MODEL_PATH="/root/Models/LLaDA-8B-Instruct"
+MODEL_PATH="/home/jwliu/dlm/SPG/save_dir/hf_models/LLaDA-8B-Instruct"
 # Allow overriding for quick smoke-tests
 NUM_ITER="${NUM_ITER:-4}"
 PER_DEVICE_TRAIN_BATCH_SIZE="${PER_DEVICE_TRAIN_BATCH_SIZE:-6}"
@@ -123,7 +123,6 @@ ACCEL_CMD=("${ACCEL_BASE[@]}"
   --output_dir "${SAVE_DIR}"
   --trainer "$TRAINER"
   --forward_type "$FORWARD_TYPE"
-  --num_t 4
   --min_t 0
   --max_t 1
   --num_generations 6

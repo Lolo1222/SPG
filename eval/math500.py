@@ -6,6 +6,8 @@
 import torch
 import numpy as np
 import torch.nn.functional as F
+import json
+import os
 
 from transformers import AutoTokenizer, AutoModel
 from tqdm import tqdm
@@ -36,8 +38,43 @@ class MATH500Dataset(GSM8KDataset):
         add_reasoning=True,
         system_prompt=MATH500_SYSTEM_PROMPT,
         subsample=-1,
+        subset="all",
+        split_file=None,
+        split_seed=42,
     ):
         super().__init__(tokenizer, num_examples, add_reasoning, system_prompt, subsample)
+        self.subset = subset
+        self.split_file = split_file
+        self.split_seed = split_seed
+
+        if self.subset in ["val", "test"]:
+            split_indices = self._get_subset_indices(len(self.dataset), self.subset)
+            base_indices = np.asarray(self.subsample)
+            self.subsample = base_indices[np.isin(base_indices, split_indices)]
+            print(f"Using MATH-500 {self.subset} subset with {len(self.subsample)} examples")
+        elif self.subset != "all":
+            raise ValueError(f"Unsupported MATH-500 subset: {self.subset}. Use one of: all, val, test")
+
+    def _build_random_split(self, total_size):
+        rng = np.random.RandomState(self.split_seed)
+        perm = rng.permutation(total_size)
+        midpoint = total_size // 2
+        return {
+            "val": perm[:midpoint].tolist(),
+            "test": perm[midpoint:].tolist(),
+        }
+
+    def _get_subset_indices(self, total_size, subset):
+        if self.split_file is not None and os.path.exists(self.split_file):
+            with open(self.split_file, "r") as f:
+                split_data = json.load(f)
+            if subset not in split_data:
+                raise KeyError(f"Subset key '{subset}' not found in split file: {self.split_file}")
+            return np.asarray(split_data[subset])
+
+        if self.split_file is not None:
+            print(f"Split file not found at {self.split_file}. Falling back to on-the-fly split with seed {self.split_seed}.")
+        return np.asarray(self._build_random_split(total_size)[subset])
 
     def load_test_dataset(self):
         self.dataset = load_dataset("HuggingFaceH4/MATH-500", split="test")

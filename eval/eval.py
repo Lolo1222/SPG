@@ -203,6 +203,9 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--remasking", type=str, default="low_confidence")
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--math500_subset", type=str, choices=["all", "val", "test"], default="all")
+    parser.add_argument("--math500_split_file", type=str, default="")
+    parser.add_argument("--math500_split_seed", type=int, default=42)
     args = parser.parse_args()
 
     if args.seed is not None:
@@ -220,6 +223,9 @@ if __name__ == "__main__":
 
     if args.few_shot > 0:
         model_name = model_name + f"_fs{args.few_shot}"
+
+    if args.dataset == "math" and args.math500_subset != "all":
+        model_name = model_name + f"_{args.math500_subset}"
 
     if len(args.suffix) > 0:
         model_name = model_name + f"_{args.suffix}"
@@ -256,12 +262,21 @@ if __name__ == "__main__":
                 dist.broadcast(param.data, src=0)
             print(f"Rank {local_rank}: Parameters synchronized")
 
-    dataset = DATASET_MAP[args.dataset](
-        tokenizer,
-        subsample=num_evals[args.dataset],
-        num_examples=args.few_shot,
-        add_reasoning=True,  # prefill for all models
-    )
+    dataset_kwargs = {
+        "subsample": num_evals[args.dataset],
+        "num_examples": args.few_shot,
+        "add_reasoning": True,  # prefill for all models
+    }
+    if args.dataset == "math":
+        dataset_kwargs.update(
+            {
+                "subset": args.math500_subset,
+                "split_file": args.math500_split_file if len(args.math500_split_file) > 0 else None,
+                "split_seed": args.math500_split_seed,
+            }
+        )
+
+    dataset = DATASET_MAP[args.dataset](tokenizer, **dataset_kwargs)
 
     dataloader = DataLoader(
         dataset,

@@ -11,16 +11,16 @@ echo "REPO_ROOT=$REPO_ROOT"
 ############# FIX *****************
 ACCEL_CONFIG_FILE="${REPO_ROOT}/spg/slurm_scripts/accelerate_genai_a100.yaml"
 TRAIN_CONFIG_FILE="${REPO_ROOT}/spg/slurm_scripts/train_elbo.yaml"
-DATASET="math"
-RUN_NAME=${DATASET}_swift_grpo_generated_num_t3_semi0.95_mask_answer_low_confidence_early0.95
-TRAINER="swift"
+DATASET="countdown"
+RUN_NAME=${DATASET}_spgmix_swift_grpo_generated_num_t3_semi0.95_mask_answer_low_confidence_early0.95
+TRAINER="so"
 FORWARD_TYPE="random"
 SEMI_OFFLINE_STRATEGY="mask_answer_low_confidence"
 ############# FIX *****************
 
 GPU_IDS="${GPU_IDS:-}"
 
-CONDA_ENV="${CONDA_ENV:-spg}"
+CONDA_ENV="${CONDA_ENV:-semi}"
 # Dry-run mode: set DRY_RUN=1 to only print the command without executing
 DRY_RUN="${DRY_RUN:-0}"
 if [ -n "$GPU_IDS" ]; then
@@ -124,12 +124,17 @@ ACCEL_CMD=("${ACCEL_BASE[@]}"
   --output_dir "${SAVE_DIR}"
   --trainer "$TRAINER"
   --forward_type "$FORWARD_TYPE"
+  --max_steps 6000
   --num_t 3
   --min_t 0
   --max_t 1
+  --beta 0.0
+  --logp_estimation mix
+  --mix_weight 0.5
+  --eubo_beta 1.5  
   --num_generations 6
   --semi_offline_flag True
-  --semi_offline_data_path dataset/llada_math_generations_7500_converted.jsonl
+  --semi_offline_data_path /home/jwliu/dlm/SPG/dataset/llada_countdown_generation_converted.jsonl
   --semi_offline_ratio 0.95
   --early_stop_rollout_flag True
   --early_stop_threshold 0.95  
