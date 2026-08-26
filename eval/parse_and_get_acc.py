@@ -491,3 +491,5 @@ if __name__ == "__main__":
     # aggregate_results(directory="/home/jwliu/dlm/SPG/save_dir//new_eval_results/countdown_spgmix_swift_grpo_generated_num_t3_semi0.95_mask_answer_low_confidence_early0.95_20260402_203957")
     aggregate_results(directory="/home/jwliu/dlm/SPG/save_dir/eval_results/countdown_spgmix_swift_grpo_generated_num_t3_semi0.95_mask_answer_low_confidence_early0.95_20260402_203957")
     aggregate_results(directory="/home/jwliu/dlm/SPG/save_dir/eval_results/countdown_spg_mix_num_t3_20260403_064750")
+    aggregate_results(directory="/home/jwliu/dlm/SPG/save_dir/new_eval_results/math_swift_grpo_generated_num_t3_semi0.9_mask_answer_low_confidence_early0.95_20260520_143645")
+    aggregate_results(directory="/home/jwliu/dlm/SPG/save_dir/new_eval_results/gsm8k_token_spg_mix_num_t3_20260523_091307")

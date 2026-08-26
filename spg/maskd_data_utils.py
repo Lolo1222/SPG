@@ -192,9 +192,17 @@ def generate_masked_sequence(
                 
                 bs_curr = len(batch_prompts)
                 
-                gen_input_ids = torch.full_like(gen_enc["input_ids"], mask_id)
-                
-                input_ids = torch.cat([prompt_enc["input_ids"], gen_input_ids], dim=1).to(model.device)
+                # Tokenizers represent an all-empty text batch as a float
+                # tensor with shape [batch, 0]. Always construct model indices
+                # explicitly as long so an invalid row cannot promote the
+                # concatenated prompt IDs to float before embedding lookup.
+                gen_input_ids = torch.full(
+                    gen_enc["input_ids"].shape, mask_id, dtype=torch.long
+                )
+
+                input_ids = torch.cat(
+                    [prompt_enc["input_ids"].to(torch.long), gen_input_ids], dim=1
+                ).to(model.device)
                 attention_mask = torch.cat([prompt_enc["attention_mask"], gen_enc["attention_mask"]], dim=1).to(model.device)
                 
                 with torch.no_grad():
@@ -203,7 +211,7 @@ def generate_masked_sequence(
                 prompt_len = prompt_enc["input_ids"].shape[1]
                 gen_logits = logits[:, prompt_len:, :]
                 
-                target_ids = gen_enc["input_ids"].to(model.device)
+                target_ids = gen_enc["input_ids"].to(device=model.device, dtype=torch.long)
                 target_mask = gen_enc["attention_mask"].to(model.device)
                 
                 # Avoid log(0) if any issue, but float32 usually fine.
@@ -250,9 +258,13 @@ def generate_masked_sequence(
                 
                 bs_curr = len(batch_prompts)
                 
-                gen_input_ids = torch.full_like(gen_enc["input_ids"], mask_id)
-                
-                input_ids = torch.cat([prompt_enc["input_ids"], gen_input_ids], dim=1).to(model.device)
+                gen_input_ids = torch.full(
+                    gen_enc["input_ids"].shape, mask_id, dtype=torch.long
+                )
+
+                input_ids = torch.cat(
+                    [prompt_enc["input_ids"].to(torch.long), gen_input_ids], dim=1
+                ).to(model.device)
                 attention_mask = torch.cat([prompt_enc["attention_mask"], gen_enc["attention_mask"]], dim=1).to(model.device)
                 
                 with torch.no_grad():
@@ -261,7 +273,7 @@ def generate_masked_sequence(
                 prompt_len = prompt_enc["input_ids"].shape[1]
                 gen_logits = logits[:, prompt_len:, :]
                 
-                target_ids = gen_enc["input_ids"].to(model.device)
+                target_ids = gen_enc["input_ids"].to(device=model.device, dtype=torch.long)
                 target_mask = gen_enc["attention_mask"].to(model.device)
                 
                 # Avoid log(0)

@@ -346,6 +346,41 @@ class DiffuGRPOConfig(TrainingArguments):
         },
     )
 
+    logits_micro_batch_size: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Maximum number of sequences evaluated together when computing old/reference/current-policy "
+            "token log-probabilities. A small value (for example 1) substantially lowers peak VRAM at the cost "
+            "of additional forward passes. None keeps the original full-batch behavior."
+        },
+    )
+
+    gpu_memory_reserve_fraction: float = field(
+        default=0.0,
+        metadata={
+            "help": "Optional fraction of currently free GPU memory to preallocate and return to this process's "
+            "PyTorch caching allocator after model/trainer initialization. This can discourage co-tenant jobs "
+            "from taking the memory between dynamic peaks. The dummy allocation is released to the allocator, "
+            "not to the driver, so this is disabled by default and must be used only when GPU sharing policy allows it."
+        },
+    )
+
+    semi_offline_masking_batch_size: int = field(
+        default=8,
+        metadata={
+            "help": "Batch size used while constructing model-scored semi-offline masks before training. "
+            "Set to 1 to bound the large vocabulary-logits allocation."
+        },
+    )
+
+    max_train_samples: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Optional dataset cap applied before semi-offline preprocessing. Intended for smoke tests; "
+            "None uses the full training dataset."
+        },
+    )
+
     block_length: Optional[int] = field(
         default=64,
         metadata={"help": "diffusion block length"},
@@ -450,4 +485,3 @@ class DiffuGRPOConfig(TrainingArguments):
         default=0.0,
         metadata={"help": "Threshold for early stop rollout."},
     )
-    

@@ -4,6 +4,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
+from torch.utils.checkpoint import checkpoint
 from trl.trainer.grpo_trainer import GRPOTrainer
 from typing import Any, Callable, Optional, Union, Sized
 import numpy as np
@@ -149,16 +150,33 @@ class DiffuGRPOTrainer(GRPOTrainer):
     def add_gumbel_noise(self, logits, temperature, dtype):
         """
         The Gumbel max is a method for sampling categorical distributions.
-        According to arXiv:2409.02908, for MDM, low-precision Gumbel Max improves perplexity score but reduces generation quality.
-        Thus, we use float64.
+        According to arXiv:2409.02908, low-precision Gumbel Max can improve
+        MDM perplexity, so sampling uses the model dtype supplied by the caller.
         """
         if temperature == 0.0:
             return logits  # Skip noise when temperature is 0
-        logits = logits.to(dtype)
+        # Sampling from exp(logits) / (-log(U))**temperature is equivalent to
+        # taking argmax of logits - temperature * log(-log(U)).  Work in log
+        # space and update the one temporary tensor in-place.  The old code
+        # could have noise, gumbel_noise and the sampled scores alive together,
+        # each as large as [batch, sequence, vocabulary].
+        finfo = torch.finfo(dtype)
         noise = torch.rand_like(logits, dtype=dtype)
-        gumbel_noise = (-torch.log(noise)) ** temperature
-        return logits.exp() / gumbel_noise
+        noise.clamp_(min=finfo.tiny)
+        noise.log_().neg_().log_().mul_(-temperature)
+        noise.add_(logits.to(dtype))
+        return noise
 
+    @staticmethod
+    def _selected_token_confidence(logits, token_ids):
+        """Return softmax probability for selected tokens without materializing softmax(logits)."""
+        selected_logits = torch.gather(logits, dim=-1, index=token_ids.unsqueeze(-1)).squeeze(-1)
+        return torch.exp(selected_logits - torch.logsumexp(logits, dim=-1))
+
+    # LLaDA lazily caches rotary tensors during forward. inference_mode would
+    # permanently mark those cached tensors as inference-only and make the
+    # later gradient-enabled policy forward fail when autograd saves them.
+    @torch.no_grad()
     def generate(
         self,
         model,
@@ -194,7 +212,6 @@ class DiffuGRPOTrainer(GRPOTrainer):
                 num_transfer_tokens = self.get_num_transfer_tokens(block_mask_index, steps_per_block)
 
                 for i in range(steps_per_block):
-                    torch.cuda.empty_cache()
                     mask_index = x == mask_id
 
                     if hasattr(torch.cuda, "amp") and hasattr(torch.cuda.amp, "autocast"):
@@ -221,10 +238,7 @@ class DiffuGRPOTrainer(GRPOTrainer):
 
                             # Handle remasking strategy
                             if remasking == "low_confidence":
-                                p = F.softmax(logits.to(dtype), dim=-1)
-                                x0_p = torch.squeeze(
-                                    torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1
-                                )
+                                x0_p = self._selected_token_confidence(logits, x0)
                             elif remasking == "random":
                                 x0_p = torch.rand((x0.shape[0], x0.shape[1]), device=x0.device)
                             else:
@@ -246,10 +260,11 @@ class DiffuGRPOTrainer(GRPOTrainer):
                                     transfer_index[j, select_index] = True
 
                             x[transfer_index] = x0[transfer_index]
-                            del x0, confidence, transfer_index
+                            del logits, x0, x0_p, confidence, transfer_index
 
             return x
 
+    @torch.no_grad()
     def generate_for_semi_offline(
         self,
         model,
@@ -301,7 +316,6 @@ class DiffuGRPOTrainer(GRPOTrainer):
                 num_transfer_tokens = self.get_num_transfer_tokens(block_mask_index, steps_per_block)
 
                 for i in range(steps_per_block):
-                    torch.cuda.empty_cache()
                     if early_stop_rollout_flag and all(early_stop_flag):
                         break
                     mask_index = x == mask_id
@@ -330,10 +344,7 @@ class DiffuGRPOTrainer(GRPOTrainer):
 
                             # Handle remasking strategy
                             if remasking == "low_confidence":
-                                p = F.softmax(logits.to(dtype), dim=-1)
-                                x0_p = torch.squeeze(
-                                    torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1
-                                )
+                                x0_p = self._selected_token_confidence(logits, x0)
                             elif remasking == "random":
                                 x0_p = torch.rand((x0.shape[0], x0.shape[1]), device=x0.device)
                             else:
@@ -362,7 +373,7 @@ class DiffuGRPOTrainer(GRPOTrainer):
                                     transfer_index[j, select_index] = True
 
                             x[transfer_index] = x0[transfer_index]
-                            del x0, confidence, transfer_index
+                            del logits, x0, x0_p, confidence, transfer_index
             if early_stop_rollout_flag and all(early_stop_flag):
                 # print(f"Early stop rollout at total_gen_token_counts: {total_gen_token_counts}")
                 still_masked_index = x == mask_id
@@ -473,116 +484,111 @@ class DiffuGRPOTrainer(GRPOTrainer):
         """
         Calculate per-token log probabilities.
         """
-        num_iterations, batch_size, seq_len = input_ids.size()
-        device = input_ids.device
-        per_token_logps = torch.zeros(num_iterations, batch_size, logits_to_keep, device=device)
-
-        # Verify mask_seeds length: one seed per iteration
-        assert (
-            len(mask_seeds) == num_iterations
-        ), f"Expected mask_seeds length to be {num_iterations}, got {len(mask_seeds)}"
-
-        prompt_length = seq_len - logits_to_keep
-        prompt_index = torch.zeros(seq_len, dtype=torch.bool, device=device)
-        prompt_index[:prompt_length] = True  # Mark prompt tokens as True
-
-        # applying masks
-        all_perturbed_seqs = []
-        all_expanded_inputs = []
-        for iter_idx, mask_seed in enumerate(mask_seeds):
-            expanded_input = input_ids[iter_idx]  # [batch_size, seq_len]
-            perturbed_seq, _ = self.forward_process(
-                expanded_input, prompt_index, self.args.mask_id, seed=mask_seed
-            )
-            all_perturbed_seqs.append(perturbed_seq)
-            all_expanded_inputs.append(expanded_input)
-
-        # Concatenate all iterations into a single batch
-        perturbed_seq = torch.cat(all_perturbed_seqs, dim=0)  # [num_iterations * batch_size, seq_len]
-        expanded_input = torch.cat(all_expanded_inputs, dim=0)  # [num_iterations * batch_size, seq_len]
-
-        # Get model predictions for the combined batch
-        logits = self.get_logits(
-            model, perturbed_seq, prompt_index, self.args.cfg_scale, self.args.mask_id
-        )  # [num_iterations * batch_size, seq_len, vocab_size]
-
-        # Calculate cross-entropy loss for completion tokens only
-        completion_logits = logits[
-            :, -logits_to_keep:, :
-        ]  # [num_iterations * batch_size, logits_to_keep, vocab_size]
-        completion_targets = expanded_input[
-            :, -logits_to_keep:
-        ]  # [num_iterations * batch_size, logits_to_keep]
-        flat_logits = completion_logits.reshape(-1, completion_logits.size(-1))
-        flat_targets = completion_targets.reshape(-1)
-        loss = F.cross_entropy(flat_logits, flat_targets, reduction="none")
-
-        # Convert to log probabilities and reshape
-        completion_log_probs = -loss.view(num_iterations * batch_size, logits_to_keep)
-        per_token_logps = completion_log_probs.view(num_iterations, batch_size, logits_to_keep)
-
-        # Clean up memory
-        del perturbed_seq, logits, all_perturbed_seqs, all_expanded_inputs
-        torch.cuda.empty_cache()
-        per_token_logps = per_token_logps.to(torch.float32)
-        return per_token_logps
+        return self._get_per_token_logps_micro_batched(
+            model=model,
+            input_ids=input_ids,
+            logits_to_keep=logits_to_keep,
+            mask_seeds=mask_seeds,
+        )
 
     def _get_per_token_logps_for_semi_offline(self, model, input_ids, logits_to_keep, mask_seeds, generation_mask, early_rollout_token_index):
         """
         Calculate per-token log probabilities for semi-offline generation.
         """
+        return self._get_per_token_logps_micro_batched(
+            model=model,
+            input_ids=input_ids,
+            logits_to_keep=logits_to_keep,
+            mask_seeds=mask_seeds,
+            generation_mask=generation_mask,
+            early_rollout_token_index=early_rollout_token_index,
+        )
+
+    def _get_per_token_logps_micro_batched(
+        self,
+        model,
+        input_ids,
+        logits_to_keep,
+        mask_seeds,
+        generation_mask=None,
+        early_rollout_token_index=None,
+    ):
+        """Compute token log-probabilities with a bounded logits batch.
+
+        The original implementation flattened every GRPO iteration into one
+        model call.  Since LLaDA has a roughly 126k-token vocabulary, its
+        [iterations * batch, sequence, vocabulary] logits were commonly the
+        largest allocation in the whole job.  Chunking is especially useful
+        for the no-grad old/reference-policy passes.  During the current-policy
+        pass, non-reentrant activation checkpointing also prevents every
+        chunk's vocabulary-sized cross-entropy state from remaining live until
+        backward.
+        """
         num_iterations, batch_size, seq_len = input_ids.size()
         device = input_ids.device
-        per_token_logps = torch.zeros(num_iterations, batch_size, logits_to_keep, device=device)
-
-        # Verify mask_seeds length: one seed per iteration
         assert (
             len(mask_seeds) == num_iterations
         ), f"Expected mask_seeds length to be {num_iterations}, got {len(mask_seeds)}"
 
         prompt_length = seq_len - logits_to_keep
         prompt_index = torch.zeros(seq_len, dtype=torch.bool, device=device)
-        prompt_index[:prompt_length] = True  # Mark prompt tokens as True
+        prompt_index[:prompt_length] = True
 
-        # applying masks
         all_perturbed_seqs = []
-        all_expanded_inputs = []
         for iter_idx, mask_seed in enumerate(mask_seeds):
-            expanded_input = input_ids[iter_idx]  # [batch_size, seq_len]
             perturbed_seq, _ = self.forward_process(
-                expanded_input, prompt_index, self.args.mask_id, seed=mask_seed, generation_mask=generation_mask, early_rollout_token_index=early_rollout_token_index
+                input_ids[iter_idx],
+                prompt_index,
+                self.args.mask_id,
+                seed=mask_seed,
+                generation_mask=generation_mask,
+                early_rollout_token_index=early_rollout_token_index,
             )
             all_perturbed_seqs.append(perturbed_seq)
-            all_expanded_inputs.append(expanded_input)
 
-        # Concatenate all iterations into a single batch
-        perturbed_seq = torch.cat(all_perturbed_seqs, dim=0)  # [num_iterations * batch_size, seq_len]
-        expanded_input = torch.cat(all_expanded_inputs, dim=0)  # [num_iterations * batch_size, seq_len]
+        flat_perturbed = torch.cat(all_perturbed_seqs, dim=0)
+        flat_targets = input_ids.reshape(num_iterations * batch_size, seq_len)
+        total_sequences = flat_perturbed.size(0)
+        configured_micro_batch = getattr(self.args, "logits_micro_batch_size", None)
+        micro_batch_size = total_sequences if configured_micro_batch is None else int(configured_micro_batch)
+        if micro_batch_size < 1:
+            raise ValueError("logits_micro_batch_size must be at least 1")
+        micro_batch_size = min(micro_batch_size, total_sequences)
 
-        # Get model predictions for the combined batch
-        logits = self.get_logits(
-            model, perturbed_seq, prompt_index, self.args.cfg_scale, self.args.mask_id
-        )  # [num_iterations * batch_size, seq_len, vocab_size]
+        def logps_for_chunk(sequence_chunk, target_chunk):
+            logits = self.get_logits(
+                model, sequence_chunk, prompt_index, self.args.cfg_scale, self.args.mask_id
+            )
+            completion_logits = logits[:, -logits_to_keep:, :]
+            completion_targets = target_chunk[:, -logits_to_keep:]
+            loss = F.cross_entropy(
+                completion_logits.reshape(-1, completion_logits.size(-1)),
+                completion_targets.reshape(-1),
+                reduction="none",
+            )
+            return -loss.view(sequence_chunk.size(0), logits_to_keep)
 
-        # Calculate cross-entropy loss for completion tokens only
-        completion_logits = logits[
-            :, -logits_to_keep:, :
-        ]  # [num_iterations * batch_size, logits_to_keep, vocab_size]
-        completion_targets = expanded_input[
-            :, -logits_to_keep:
-        ]  # [num_iterations * batch_size, logits_to_keep]
-        flat_logits = completion_logits.reshape(-1, completion_logits.size(-1))
-        flat_targets = completion_targets.reshape(-1)
-        loss = F.cross_entropy(flat_logits, flat_targets, reduction="none")
+        chunks = []
+        use_checkpoint = torch.is_grad_enabled() and configured_micro_batch is not None
+        for start in range(0, total_sequences, micro_batch_size):
+            end = min(start + micro_batch_size, total_sequences)
+            sequence_chunk = flat_perturbed[start:end]
+            target_chunk = flat_targets[start:end]
+            if use_checkpoint:
+                chunk_logps = checkpoint(
+                    logps_for_chunk,
+                    sequence_chunk,
+                    target_chunk,
+                    use_reentrant=False,
+                )
+            else:
+                chunk_logps = logps_for_chunk(sequence_chunk, target_chunk)
+            chunks.append(chunk_logps.to(torch.float32))
 
-        # Convert to log probabilities and reshape
-        completion_log_probs = -loss.view(num_iterations * batch_size, logits_to_keep)
-        per_token_logps = completion_log_probs.view(num_iterations, batch_size, logits_to_keep)
-
-        # Clean up memory
-        del perturbed_seq, logits, all_perturbed_seqs, all_expanded_inputs
-        torch.cuda.empty_cache()
-        per_token_logps = per_token_logps.to(torch.float32)
+        per_token_logps = torch.cat(chunks, dim=0).view(
+            num_iterations, batch_size, logits_to_keep
+        )
+        del flat_perturbed, flat_targets, all_perturbed_seqs, chunks
         return per_token_logps
 
     def _prepare_inputs(
@@ -671,7 +677,6 @@ class DiffuGRPOTrainer(GRPOTrainer):
                 prompt_completion_ids_all.append(batch_prompt_completion_ids)
 
                 del batch_prompt_ids, batch_prompt_mask, batch_prompt_completion_ids
-                torch.cuda.empty_cache()
 
             prompt_completion_ids = torch.cat(prompt_completion_ids_all, dim=0)
 
@@ -698,12 +703,11 @@ class DiffuGRPOTrainer(GRPOTrainer):
 
         all_old_per_token_logps = []
         all_ref_per_token_logps = []
+        prompt_completion_ids_expanded = prompt_completion_ids.unsqueeze(0).expand(
+            self.num_iterations, -1, -1
+        )
         with torch.no_grad():
             if self.num_iterations > 1:
-                # repeat prompt completion ids self.num_iterations times
-                prompt_completion_ids_expanded = prompt_completion_ids.unsqueeze(0).expand(
-                    self.num_iterations, -1, -1
-                )
                 old_per_token_logps = self._get_per_token_logps(
                     self.model, prompt_completion_ids_expanded, logits_to_keep, mask_seeds
                 )
@@ -916,7 +920,6 @@ class DiffuGRPOTrainer(GRPOTrainer):
                 early_rollout_token_index_all.append(batch_early_rollout_token_index)
 
                 del batch_prompt_ids, batch_prompt_mask, batch_prompt_completion_ids
-                torch.cuda.empty_cache()
 
             prompt_completion_ids = torch.cat(prompt_completion_ids_all, dim=0)
             if self.args.early_stop_rollout_flag:
@@ -967,12 +970,11 @@ class DiffuGRPOTrainer(GRPOTrainer):
 
         all_old_per_token_logps = []
         all_ref_per_token_logps = []
+        prompt_completion_ids_expanded = prompt_completion_ids.unsqueeze(0).expand(
+            self.num_iterations, -1, -1
+        )
         with torch.no_grad():
             if self.num_iterations > 1:
-                # repeat prompt completion ids self.num_iterations times
-                prompt_completion_ids_expanded = prompt_completion_ids.unsqueeze(0).expand(
-                    self.num_iterations, -1, -1
-                )
                 old_per_token_logps = self._get_per_token_logps_for_semi_offline(
                     self.model, prompt_completion_ids_expanded, logits_to_keep, mask_seeds, generation_mask=generation_mask, early_rollout_token_index=early_rollout_token_index
                 )

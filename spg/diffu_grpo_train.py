@@ -5,7 +5,7 @@
 
 import torch
 import wandb
-from transformers import AutoTokenizer, AutoModel, BitsAndBytesConfig
+from transformers import AutoTokenizer, AutoModel, BitsAndBytesConfig, TrainerCallback
 from trl import TrlParser, ModelConfig
 from peft import LoraConfig
 
@@ -148,6 +148,90 @@ def start_periodic_checkpoint_saver(trainer, model, ckpt_dir: str, save_every_st
     t.start()
     return t
 
+
+def reserve_free_cuda_memory_for_allocator(fraction: float, device: torch.device):
+    """Reserve free VRAM in this process's allocator without pinning it forever.
+
+    A tensor that remains alive would reduce the memory available to training.
+    Instead, this function allocates one large temporary tensor and deletes it
+    without calling ``torch.cuda.empty_cache``. PyTorch keeps the block in its
+    caching allocator, so this process can reuse it while other processes see
+    it as occupied at the driver level. This is intentionally opt-in: it is a
+    cooperative-sharing workaround, not an administrative GPU isolation
+    mechanism, and should only be used when the user is allowed to reserve the
+    selected GPU.
+    """
+    try:
+        fraction = float(fraction)
+    except (TypeError, ValueError):
+        raise ValueError(f"gpu_memory_reserve_fraction must be a number in [0, 1), got {fraction!r}")
+    if not 0.0 <= fraction < 1.0:
+        raise ValueError(f"gpu_memory_reserve_fraction must be in [0, 1), got {fraction}")
+    if fraction == 0.0 or not torch.cuda.is_available():
+        return 0
+
+    free_bytes, _ = torch.cuda.mem_get_info(device)
+    reserve_bytes = int(free_bytes * fraction)
+    # Avoid tiny allocations that are unlikely to provide useful protection.
+    minimum_bytes = 256 * 1024 * 1024
+    if reserve_bytes < minimum_bytes:
+        print(
+            f"[gpu_reserve] requested fraction={fraction:.3f}, but only {free_bytes / 2**30:.2f} GiB is free; "
+            "skipping a sub-256 MiB reservation"
+        )
+        return 0
+
+    # Fragmentation can make an exact allocation fail even when the driver
+    # reports enough aggregate free memory. Back off rather than failing the
+    # whole training job, and leave the actual training peak to the normal OOM
+    # supervisor in the shell launcher.
+    attempted_bytes = reserve_bytes
+    reserved_bytes = 0
+    while attempted_bytes >= minimum_bytes:
+        try:
+            reservation = torch.empty((attempted_bytes,), dtype=torch.uint8, device=device)
+            reserved_bytes = attempted_bytes
+            del reservation
+            break
+        except torch.cuda.OutOfMemoryError:
+            attempted_bytes = int(attempted_bytes * 0.8)
+            # PyTorch may have purged an unusable cached block while handling
+            # this allocation failure; do not call empty_cache here because a
+            # successful reservation must remain visible to other processes.
+
+    if reserved_bytes == 0:
+        print("[gpu_reserve] unable to reserve the requested free-memory fraction; continuing without reservation")
+        return 0
+
+    torch.cuda.synchronize(device)
+    reserved_gib = reserved_bytes / 2**30
+    free_after, _ = torch.cuda.mem_get_info(device)
+    cached = torch.cuda.memory_reserved(device) / 2**30
+    print(
+        f"[gpu_reserve] cached {reserved_gib:.2f} GiB ({fraction:.1%} of {free_bytes / 2**30:.2f} GiB initially free); "
+        f"driver-free-after={free_after / 2**30:.2f} GiB, torch-reserved={cached:.2f} GiB"
+    )
+    return reserved_bytes
+
+
+class CudaMemoryReservationCallback(TrainerCallback):
+    """Top up the allocator after DeepSpeed has initialized its optimizer.
+
+    DeepSpeed ZeRO-1/2 calls ``empty_cache`` during initialization, which
+    intentionally clears the early reservation used to protect semi-offline
+    preprocessing. ``on_train_begin`` runs after that initialization and before
+    the first measured step, so this second reservation persists during the
+    actual training loop.
+    """
+
+    def __init__(self, fraction: float, device: torch.device):
+        self.fraction = fraction
+        self.device = device
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        reserve_free_cuda_memory_for_allocator(self.fraction, self.device)
+        return control
+
 # ------------------------------------------------------------------
 
 # ------------------------------------------------------------------
@@ -181,6 +265,12 @@ def main(grpo_config, model_config):
 
     model.config.use_cache = False
 
+    # Reserve before dataset preprocessing as low-confidence semi-offline mask
+    # construction also performs large-vocabulary model forwards. The dummy
+    # block is inactive cache and remains reusable by Trainer/DeepSpeed later.
+    reserve_fraction = getattr(grpo_config, "gpu_memory_reserve_fraction", 0.0)
+    reserve_free_cuda_memory_for_allocator(reserve_fraction, device)
+
     # Load dataset based on configuration
     # If semi-offline used, we will load dataset with generated sequences from local path
     # XXX(Lolo1222): currently only math dataset supports semi-offline mode
@@ -210,12 +300,35 @@ def main(grpo_config, model_config):
         else:
             raise ValueError(f"Semi-offline dataset not supported for dataset: {grpo_config.dataset}")
 
+        if "generation" in original_dataset.column_names:
+            valid_generation_indices = [
+                idx
+                for idx, generation in enumerate(original_dataset["generation"])
+                if isinstance(generation, str) and generation.strip()
+            ]
+            removed_generation_count = len(original_dataset) - len(valid_generation_indices)
+            if removed_generation_count:
+                print(
+                    f"[semi_offline] filtering {removed_generation_count} samples with empty/non-string generation "
+                    f"before masking ({len(valid_generation_indices)} remain)"
+                )
+                original_dataset = original_dataset.select(valid_generation_indices)
+
+        max_train_samples = getattr(grpo_config, "max_train_samples", None)
+        if max_train_samples is not None:
+            if max_train_samples < 1:
+                raise ValueError("max_train_samples must be at least 1 when set")
+            original_dataset = original_dataset.select(range(min(max_train_samples, len(original_dataset))))
+
+        masking_batch_size = int(getattr(grpo_config, "semi_offline_masking_batch_size", 8))
+        if masking_batch_size < 1:
+            raise ValueError("semi_offline_masking_batch_size must be at least 1")
         if grpo_config.dataset == "countdown":
-            dataset = generate_masked_sequence_for_countdown(original_dataset, tokenizer, model=model, p_question_mask=0, p_gen_mask=grpo_config.semi_offline_ratio, seed=grpo_config.seed, gen_masking_strategy=grpo_config.semi_offline_strategy)
+            dataset = generate_masked_sequence_for_countdown(original_dataset, tokenizer, model=model, p_question_mask=0, p_gen_mask=grpo_config.semi_offline_ratio, seed=grpo_config.seed, gen_masking_strategy=grpo_config.semi_offline_strategy, batch_size=masking_batch_size)
         elif grpo_config.dataset == "sudoku_new":
-            dataset = generate_masked_sequence_for_sudoku_new(original_dataset, tokenizer, model=model, p_question_mask=0, p_gen_mask=grpo_config.semi_offline_ratio, seed=grpo_config.seed, gen_masking_strategy=grpo_config.semi_offline_strategy)
+            dataset = generate_masked_sequence_for_sudoku_new(original_dataset, tokenizer, model=model, p_question_mask=0, p_gen_mask=grpo_config.semi_offline_ratio, seed=grpo_config.seed, gen_masking_strategy=grpo_config.semi_offline_strategy, batch_size=masking_batch_size)
         else:
-            dataset = generate_masked_sequence(original_dataset, tokenizer, model=model, p_question_mask=0, p_gen_mask=grpo_config.semi_offline_ratio, seed=grpo_config.seed, gen_masking_strategy=grpo_config.semi_offline_strategy)
+            dataset = generate_masked_sequence(original_dataset, tokenizer, model=model, p_question_mask=0, p_gen_mask=grpo_config.semi_offline_ratio, seed=grpo_config.seed, gen_masking_strategy=grpo_config.semi_offline_strategy, batch_size=masking_batch_size)
 
 
         
@@ -250,6 +363,12 @@ def main(grpo_config, model_config):
                 correctness_reward_func_math,
                 boxed_and_answer_tags_format_reward,
             ]
+
+        max_train_samples = getattr(grpo_config, "max_train_samples", None)
+        if max_train_samples is not None:
+            if max_train_samples < 1:
+                raise ValueError("max_train_samples must be at least 1 when set")
+            dataset = dataset.select(range(min(max_train_samples, len(dataset))))
 
     # Shuffle dataset with fixed seed for reproducibility
     dataset = dataset.shuffle(seed=grpo_config.seed)
@@ -374,7 +493,11 @@ def main(grpo_config, model_config):
     est_total_updates = updates_per_epoch * grpo_config.num_train_epochs
     print(f"batches_per_epoch: {batches_per_epoch}, updates_per_epoch: {updates_per_epoch}, est_total_updates: {est_total_updates}")
     os.environ["WANDB_MODE"] = "offline"
-    wandb.init(project="a800_llada_for_semi", config=grpo_config, name=grpo_config.run_name)
+    # A distributed run is one experiment. Creating a separate offline W&B
+    # run on every rank adds avoidable I/O and can make multi-GPU runs appear
+    # slower without providing additional metrics.
+    if trainer.is_world_process_zero():
+        wandb.init(project="a800_llada_for_semi", config=grpo_config, name=grpo_config.run_name)
     # Setup checkpoint directory and try to resume from latest checkpoint if present
     ckpt_dir = getattr(grpo_config, "output_dir", None) or os.environ.get("CHECKPOINT_DIR", "checkpoints_on_low_mem")
     os.makedirs(ckpt_dir, exist_ok=True)
@@ -439,6 +562,9 @@ def main(grpo_config, model_config):
         print(f"[checkpoint] Trainer configured to save every {save_every} steps; skipping periodic saver thread")
     else:
         start_periodic_checkpoint_saver(trainer, model, ckpt_dir, save_every_steps=save_every)
+
+    if reserve_fraction:
+        trainer.add_callback(CudaMemoryReservationCallback(reserve_fraction, device))
 
     # Start training, resuming from checkpoint if available
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)

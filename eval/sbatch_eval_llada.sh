@@ -24,7 +24,7 @@ which torchrun || echo "torchrun not found in PATH"
 
 # Configuration variables
 # GPU_IDS will be automatically set by SLURM, but we'll use all available GPUs
-GPU_IDS=(0 3)
+GPU_IDS=(6)
 
 # Generate a random port number between 10000 and 65535
 MASTER_PORT=$((RANDOM % 55536 + 10000))
@@ -68,8 +68,8 @@ for task in "${TASKS[@]}"; do
       --dataset $task \
       --batch_size $batch_size \
       --gen_length $gen_length \
-      --output_dir "${SAVE_DIR}/new_eval_results/countdown_spgmix_swift_grpo_generated_num_t3_semi0.95_mask_answer_low_confidence_early0.95_20260402_203957" \
-      --model_path "/home/jwliu/dlm/SPG/save_dir/run_results/countdown_spgmix_swift_grpo_generated_num_t3_semi0.95_mask_answer_low_confidence_early0.95_20260402_203957/checkpoint-6000"
+      --output_dir "${SAVE_DIR}/new_eval_results/gsm8k_token_spg_mix_num_t3_20260523_091307" \
+      --model_path "/home/jwliu/dlm/SPG/save_dir/token_spg_mix_num_t3_20260523_091307/checkpoint-6000"
 
       # --model_path "${SAVE_DIR}/hf_models/LLaDA-8B-Instruct/"
     # CUDA_VISIBLE_DEVICES=$GPU_LIST torchrun \
