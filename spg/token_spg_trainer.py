@@ -28,6 +28,7 @@ from trl.trainer.utils import (
     selective_log_softmax,
 )
 import wandb
+from spg.memory_utils import chunked_token_nll, selected_token_confidence
 
 if is_peft_available():
     from peft import PeftConfig, get_peft_model
@@ -146,10 +147,9 @@ class TokenSPGTrainer(GRPOTrainer):
         """
         if temperature == 0.0:
             return logits  # Skip noise when temperature is 0
-        logits = logits.to(dtype)
         noise = torch.rand_like(logits, dtype=dtype)
-        gumbel_noise = (-torch.log(noise)) ** temperature
-        return logits.exp() / gumbel_noise
+        noise.clamp_(min=torch.finfo(dtype).tiny).log_().neg_().log_().mul_(-temperature)
+        return noise.add_(logits.to(dtype))
 
     def generate(
         self,
@@ -220,10 +220,7 @@ class TokenSPGTrainer(GRPOTrainer):
 
                             # Handle remasking strategy
                             if remasking == "low_confidence":
-                                p = F.softmax(logits.to(dtype), dim=-1)
-                                x0_p = torch.squeeze(
-                                    torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1
-                                )
+                                x0_p = selected_token_confidence(logits, x0)
                             elif remasking == "random":
                                 x0_p = torch.rand((x0.shape[0], x0.shape[1]), device=x0.device)
                             else:
@@ -481,10 +478,7 @@ class TokenSPGTrainer(GRPOTrainer):
                             del logits_with_noise
 
                             if remasking == "low_confidence":
-                                p = F.softmax(logits.to(dtype), dim=-1)
-                                x0_p = torch.squeeze(
-                                    torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1
-                                )
+                                x0_p = selected_token_confidence(logits, x0)
                             elif remasking == "random":
                                 x0_p = torch.rand((x0.shape[0], x0.shape[1]), device=x0.device)
                             else:
@@ -655,36 +649,26 @@ class TokenSPGTrainer(GRPOTrainer):
         if prompt_mask is not None:
             prompt_mask = torch.cat([prompt_mask]*num_iterations, dim=0)
 
-        # Get model predictions for the combined batch
-        logits = self.get_logits(
-            model, perturbed_seq, prompt_index, self.args.cfg_scale, self.args.mask_id, prompt_mask
-        )  # [num_iterations * batch_size, num_t, seq_len, vocab_size]
-
-        # Calculate cross-entropy loss for completion tokens only
-        completion_logits = logits[
-            :, :, -logits_to_keep:, :
-        ]  # [num_iterations * batch_size, num_t, logits_to_keep, vocab_size]
         completion_targets = expanded_input[
             :, -logits_to_keep:
         ]  # [num_iterations * batch_size, logits_to_keep]
         perturb_mask = perturb_mask[:, :, -logits_to_keep:]
         all_block_masks = all_block_masks[:, :, -logits_to_keep:]
-
-        completion_targets = completion_targets.unsqueeze(1).repeat(1, self.args.num_t, 1)
-        flat_logits = completion_logits.reshape(-1, completion_logits.size(-1))
-        flat_targets = completion_targets.reshape(-1)
-        
-        loss = F.cross_entropy(flat_logits, flat_targets, reduction="none")
-        prob = F.softmax(flat_logits, dim=-1).gather(dim=-1, index=flat_targets.unsqueeze(-1))
-        
-        # Convert to log probabilities and reshape
-        completion_log_probs = -loss.view(num_iterations * batch_size, self.args.num_t, logits_to_keep)
-        completion_probs = prob.view(num_iterations * batch_size, self.args.num_t, logits_to_keep)
+        # Bound the vocabulary-sized allocation to a configurable micro-batch;
+        # the helper checkpoints gradient-enabled chunks so their activations
+        # are not all retained until backward.
+        nll_per_token, completion_probs = chunked_token_nll(
+            model, self.get_logits, perturbed_seq, completion_targets,
+            logits_to_keep, getattr(self.args, "logits_micro_batch_size", None),
+            prompt_index, self.args.cfg_scale, self.args.mask_id,
+            prompt_mask=prompt_mask, need_prob=True,
+        )
+        completion_log_probs = -nll_per_token
         per_token_logps = completion_log_probs.view(num_iterations, batch_size, self.args.num_t, logits_to_keep)
         per_token_probs = completion_probs.view(num_iterations, batch_size, self.args.num_t, logits_to_keep)
 
         # Clean up memory
-        del perturbed_seq, logits, all_perturbed_seqs, all_expanded_inputs
+        del perturbed_seq, all_perturbed_seqs, all_expanded_inputs
         torch.cuda.empty_cache()
         per_token_logps = per_token_logps.to(torch.float32)
         per_token_probs = per_token_probs.to(torch.float32)

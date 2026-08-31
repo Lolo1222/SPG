@@ -19,6 +19,7 @@ from trl.import_utils import is_rich_available
 from accelerate.utils import gather, gather_object, set_seed
 from trl.data_utils import is_conversational, maybe_apply_chat_template
 from trl.models import unwrap_model_for_generation
+from spg.memory_utils import chunked_token_nll, selected_token_confidence
 from trl.trainer.utils import print_prompt_completions_sample
 import wandb
 
@@ -292,26 +293,12 @@ class SWIFTTrainer(GRPOTrainer):
                 current_input, prompt_index, self.args.mask_id, seed=mask_seed, completion_mask=completion_mask
             )
             
-            # 2. Compute logits
-            # Shape: [batch_size, num_t, seq_len, vocab_size]
-            logits = self.get_logits(
-                model, noisy_batch, prompt_index, self.args.cfg_scale, self.args.mask_id
+            nll_per_token, _ = chunked_token_nll(
+                model, self.get_logits, noisy_batch,
+                current_input[:, -logits_to_keep:], logits_to_keep,
+                getattr(self.args, "logits_micro_batch_size", None), prompt_index,
+                self.args.cfg_scale, self.args.mask_id,
             )
-            
-            # 3. Compute Cross Entropy Loss (NLL) for completion tokens
-            completion_logits = logits[:, :, -logits_to_keep:, :] # [B, T, L, V]
-            
-            # Targets: [B, T, L]
-            targets = current_input[:, -logits_to_keep:].unsqueeze(1).repeat(1, self.args.num_t, 1)
-            
-            flat_logits = completion_logits.reshape(-1, completion_logits.size(-1))
-            flat_targets = targets.reshape(-1)
-            
-            # reduction='none' to get per-token loss
-            loss = F.cross_entropy(flat_logits, flat_targets, reduction="none")
-            
-            # Reshape back to [Batch, Num_T, Logits_To_Keep]
-            nll_per_token = loss.view(batch_size, self.args.num_t, logits_to_keep)
             
             # 4. Compute ELBO (Mean over Num_T)
             # LogProb = -NLL
@@ -347,26 +334,12 @@ class SWIFTTrainer(GRPOTrainer):
                 current_input, prompt_index, self.args.mask_id, seed=mask_seed, completion_mask=completion_mask, generation_mask=generation_mask, early_rollout_token_index=early_rollout_token_index
             )
             
-            # 2. Compute logits
-            # Shape: [batch_size, num_t, seq_len, vocab_size]
-            logits = self.get_logits(
-                model, noisy_batch, prompt_index, self.args.cfg_scale, self.args.mask_id
+            nll_per_token, _ = chunked_token_nll(
+                model, self.get_logits, noisy_batch,
+                current_input[:, -logits_to_keep:], logits_to_keep,
+                getattr(self.args, "logits_micro_batch_size", None), prompt_index,
+                self.args.cfg_scale, self.args.mask_id,
             )
-            
-            # 3. Compute Cross Entropy Loss (NLL) for completion tokens
-            completion_logits = logits[:, :, -logits_to_keep:, :] # [B, T, L, V]
-            
-            # Targets: [B, T, L]
-            targets = current_input[:, -logits_to_keep:].unsqueeze(1).repeat(1, self.args.num_t, 1)
-            
-            flat_logits = completion_logits.reshape(-1, completion_logits.size(-1))
-            flat_targets = targets.reshape(-1)
-            
-            # reduction='none' to get per-token loss
-            loss = F.cross_entropy(flat_logits, flat_targets, reduction="none")
-            
-            # Reshape back to [Batch, Num_T, Logits_To_Keep]
-            nll_per_token = loss.view(batch_size, self.args.num_t, logits_to_keep)
             
             # 4. Compute ELBO (Mean over Num_T)
             # LogProb = -NLL
@@ -461,10 +434,7 @@ class SWIFTTrainer(GRPOTrainer):
                             del logits_with_noise
                             
                             if remasking == "low_confidence":
-                                p = F.softmax(logits.to(dtype), dim=-1)
-                                x0_p = torch.squeeze(
-                                    torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1
-                                )
+                                x0_p = selected_token_confidence(logits, x0)
                             elif remasking == "random":
                                 x0_p = torch.rand((x0.shape[0], x0.shape[1]), device=x0.device)
                             else:
@@ -581,10 +551,7 @@ class SWIFTTrainer(GRPOTrainer):
                             del logits_with_noise
                             
                             if remasking == "low_confidence":
-                                p = F.softmax(logits.to(dtype), dim=-1)
-                                x0_p = torch.squeeze(
-                                    torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1
-                                )
+                                x0_p = selected_token_confidence(logits, x0)
                             elif remasking == "random":
                                 x0_p = torch.rand((x0.shape[0], x0.shape[1]), device=x0.device)
                             else:

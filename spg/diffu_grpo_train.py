@@ -244,8 +244,26 @@ def main(grpo_config, model_config):
     tokenizer = AutoTokenizer.from_pretrained(grpo_config.model_path, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
 
-    # Set up device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Bind each Accelerate/torchrun worker to its own local GPU before loading
+    # the model.  Relying on ``torch.device("cuda")`` here can leave every
+    # worker on CUDA device 0 because the Trainer/Accelerator is constructed
+    # later; that makes multi-GPU runs take almost the same time as one GPU.
+    if torch.cuda.is_available():
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        if local_rank < 0 or local_rank >= torch.cuda.device_count():
+            raise RuntimeError(
+                f"LOCAL_RANK={local_rank} is outside visible CUDA devices "
+                f"(count={torch.cuda.device_count()}); check GPU_IDS/accelerate launch"
+            )
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+        print(
+            f"[distributed] rank={os.environ.get('RANK', '0')} "
+            f"local_rank={local_rank} device={torch.cuda.current_device()} "
+            f"visible_devices={os.environ.get('CUDA_VISIBLE_DEVICES', '<all>')}"
+        )
+    else:
+        device = torch.device("cpu")
 
     # 4 bit quantization configuration
     bnb_config = BitsAndBytesConfig(

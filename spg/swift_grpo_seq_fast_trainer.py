@@ -17,6 +17,7 @@ from trl.extras.profiling import profiling_context, profiling_decorator
 from trl.models import unwrap_model_for_generation
 
 from spg.swift_grpo_trainer import SWIFTTrainer
+from spg.memory_utils import chunked_token_nll
 
 
 class SWIFTSeqFastTrainer(SWIFTTrainer):
@@ -74,19 +75,12 @@ class SWIFTSeqFastTrainer(SWIFTTrainer):
                 completion_mask=completion_mask,
             )
 
-            logits = self.get_logits(
-                model,
-                noisy_batch,
-                prompt_index,
-                self.args.cfg_scale,
-                self.args.mask_id,
+            nll, _ = chunked_token_nll(
+                model, self.get_logits, noisy_batch,
+                current_input[:, -logits_to_keep:], logits_to_keep,
+                getattr(self.args, "logits_micro_batch_size", None), prompt_index,
+                self.args.cfg_scale, self.args.mask_id,
             )
-            completion_logits = logits[:, :, -logits_to_keep:, :]  # [B, T, L, V]
-
-            targets = current_input[:, -logits_to_keep:].unsqueeze(1).repeat(1, self.args.num_t, 1)
-            flat_logits = completion_logits.reshape(-1, completion_logits.size(-1))
-            flat_targets = targets.reshape(-1)
-            nll = F.cross_entropy(flat_logits, flat_targets, reduction="none")
 
             token_logps = -nll.view(batch_size, self.args.num_t, logits_to_keep)
             seq_logps_per_t = self._aggregate_token_logps_to_seq(token_logps, completion_mask)
@@ -126,19 +120,12 @@ class SWIFTSeqFastTrainer(SWIFTTrainer):
                 early_rollout_token_index=early_rollout_token_index,
             )
 
-            logits = self.get_logits(
-                model,
-                noisy_batch,
-                prompt_index,
-                self.args.cfg_scale,
-                self.args.mask_id,
+            nll, _ = chunked_token_nll(
+                model, self.get_logits, noisy_batch,
+                current_input[:, -logits_to_keep:], logits_to_keep,
+                getattr(self.args, "logits_micro_batch_size", None), prompt_index,
+                self.args.cfg_scale, self.args.mask_id,
             )
-            completion_logits = logits[:, :, -logits_to_keep:, :]  # [B, T, L, V]
-
-            targets = current_input[:, -logits_to_keep:].unsqueeze(1).repeat(1, self.args.num_t, 1)
-            flat_logits = completion_logits.reshape(-1, completion_logits.size(-1))
-            flat_targets = targets.reshape(-1)
-            nll = F.cross_entropy(flat_logits, flat_targets, reduction="none")
 
             token_logps = -nll.view(batch_size, self.args.num_t, logits_to_keep)
             seq_logps_per_t = self._aggregate_token_logps_to_seq(token_logps, completion_mask)

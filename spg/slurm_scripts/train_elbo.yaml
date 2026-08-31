@@ -67,6 +67,7 @@ max_prompt_length: 200
 block_length: 32
 diffusion_steps: 128
 generation_batch_size: 6
+logits_micro_batch_size: 1
 remasking: low_confidence
 random_masking: True
 # Lolo1222:change from 0.15 to 0.0
